@@ -6,6 +6,7 @@
 #include "pub_tool_libcbase.h"
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
+#include "pub_tool_xarray.h"   // XArray
 
 
 
@@ -22,8 +23,16 @@ static Bool clo_trace_sbs = False;
 
 static void trace_superblock(Addr addr)
 {
-   VG_(printf)("Call jump in the address - 0x%lx\n", addr);
-   clo_trace_sbs = False;
+    Addr current_sp = VG_(get_SP)(1); //stack address
+    if (VG_(has_CF_info)(addr)){
+//         XArray*  blocks = VG_(di_get_stack_blocks_at_ip)( current_sp, 0);//take array of StackBlock
+//         if (blocks!= NULL && VG_(sizeXA)(blocks) != 0) {
+//             VG_(printf)("stack %lx - %lx \n", addr, current_sp);
+//         }
+        VG_(printf)("%lx - %lx \n", addr, current_sp);
+        
+    }   
+    clo_trace_sbs = False;
 }
 
 
