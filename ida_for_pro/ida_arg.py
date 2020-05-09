@@ -1,6 +1,7 @@
 from idautils import *
 from idaapi import *
 import myregister
+
 {
 	# parsing of decompiler argument string
 	# it look like  void __usercall fooo(__int64 a1@<rbp>, __int64 a2@<rdi>)
@@ -21,6 +22,7 @@ import myregister
 	 #  	size - number of bytes
 	# (int x, int y@<esi>) stack and register
 }
+
 def take_arg(str_input):
     arg = []
     str_input = str_input[str_input.rfind("(") + 1: -1]
@@ -39,7 +41,9 @@ def take_arg(str_input):
     return arg
 
 
+
 def argloc_info(data):
+	# input format : type offset (register(s) name(s))
     if data.is_stkoff():
         offset = data.stkoff()
         rez = "stack "
@@ -53,44 +57,61 @@ def argloc_info(data):
     if data.is_reg1():
         regnum = data.reg1()
         rez = "reg1 "
-        rez += myregister.REG[regnum]
-        rez += " " + str(data.regoff())
+        rez += str(data.regoff()) + " " + myregister.REG[regnum]
+        return rez
+    if data.is_reg2():
+        regnum1 = data.reg1()
+        regnum2 = data.reg2()
+        rez = "reg2 "
+        rez += str(data.regoff()) + " " + myregister.REG[regnum1] 
+        rez += " " + myregister.REG[regnum2]
+        return rez
+    if data.is_rrel():
+    	rrel_data = data.get_rrel()
+        regnum = rrel_data.reg()
+        rez = "rrel "
+        rez += str(rrel_data.off()) + " " + myregister.REG[regnum]
+        return rez
+    if data.is_scattered():
+    	# i don't know, what to do in this case
+    	scatt_data = data.scattered()
+        rez = "scattered " 
         return rez
 
 #print "Hello? world!"
-for segea in Segments():
-    for funcea in Functions(segea, SegEnd(segea)):
-        tif = tinfo_t()
-        get_tinfo2(funcea, tif)
-        funcdata = func_type_data_t()
-        tif.get_func_details(funcdata)
-        functionName = GetFunctionName(funcea)
-        adr = idaapi.get_fchunk(funcea)
-        if funcdata.size() != 0:
-            print hex(funcea), " ",hex(funcdata.cc), " ", funcdata.stkargs, " ", functionName
-            for i in xrange(funcdata.size()):
-                # 0 none 
-                # 1 stack offset
-                # 2 distributed (scattered)
-                # 3 one register (and offset within it)
-                # 4 register pair
-                # 5 register relative
-                # 6 global address
-                # 7 custom argloc (7 or higher)
-                print "    Arg %d: %s location %s" % (i, print_tinfo('', 0, 0, PRTYPE_1LINE, funcdata[i].type, '', ''), 
-                    argloc_info(funcdata[i].argloc))
-        if funcdata.size() == 0:
-            flag = 1
-            f = idaapi.get_func(funcea)
-            try:
-                cfunc = idaapi.decompile(f)
-            except DecompilationFailure:
-                continue
-            else:
-                sv = cfunc.get_pseudocode()
-                print hex(funcea), " ",functionName
-                for sline in sv:
-                    print "    !!Arg %s" % (take_arg(idaapi.tag_remove(sline.line)))
-                    break 
+with open("ida_arg_198.txt", "w+") as opening:
+	start_count_read = opening.read()
+	for segea in Segments():
+	    for funcea in Functions(segea, SegEnd(segea)):
+	        tif = tinfo_t()
+	        get_tinfo2(funcea, tif)
+	        funcdata = func_type_data_t()
+	        tif.get_func_details(funcdata)
+	        functionName = GetFunctionName(funcea)
+	        adr = idaapi.get_fchunk(funcea)
+	        if funcdata.size() != 0:
+	        	# (address) (number function arguments) 
+	            info_str = str(hex(funcea)) + "\n"
+	            info_str += str(int(funcdata.size())) + "\n"
+	            for i in xrange(funcdata.size()):
+	                info_str += str(i) + " " + print_tinfo('', 0, 0, PRTYPE_1LINE, funcdata[i].type, '', '') + "\n"
+	            start_count_write = opening.write(info_str)
+	        if funcdata.size() == 0:
+	            f = idaapi.get_func(funcea)
+	            try:
+	                cfunc = idaapi.decompile(f)
+	            except DecompilationFailure:
+	                continue
+	            else:
+	                sv = cfunc.get_pseudocode()
+	                info_str = str(hex(funcea)) + "\n"
+	                # print hex(funcea), " ",functionName
+	                for sline in sv:
+	                    arg = take_arg(idaapi.tag_remove(sline.line))
+	                    info_str += str(len(arg)) + "\n"
+	                    for j in xrange(len(arg)):
+	                        info_str += str(j) + " " + arg[j] + "\n"
+	                    break
+	                start_count_write = opening.write(info_str)
 
-                     
+	                     
