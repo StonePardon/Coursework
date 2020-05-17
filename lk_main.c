@@ -2,31 +2,114 @@
 #include "pub_tool_tooliface.h"
 #include "pub_tool_libcassert.h"
 #include "pub_tool_libcprint.h"
+#include "pub_tool_libcfile.h" //file open
+#include "pub_core_threadstate.h"
 #include "pub_tool_debuginfo.h"
 #include "pub_tool_libcbase.h"
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
+#include "pub_tool_xarray.h"   // XArray
 
 
 
 /*------------------------------------------------------------*/
-/*--- Stuff for --basic-counts                             ---*/
+/*--- Stuff for basic-counts                               ---*/
 /*------------------------------------------------------------*/
 
-/* Nb: use ULongs because the numbers can get very big */
-static ULong n_func_calls    = 0;
-static ULong n_guest_instrs  = 0;
 
-static void add_one_func_call(void)
-{
-   n_func_calls++;
+
+/*------------------------------------------------------------*/
+/*--- Stuff for trace-superblocks                          ---*/
+/*------------------------------------------------------------*/
+static Bool clo_trace_sbs = False;
+Long offset_stack = 1081344;
+
+
+Int scan_line(Int fd, Char *buf){
+    Int current_index = -1;//указывает размер считаной строки
+    Int error;
+    //находим первый переход строки или обнаруживаем конец файла
+    do{ 
+        current_index++;
+        error = VG_(read)(fd, buf + current_index, 1);
+    } while(error > 0 && buf[current_index] != '\n');
+    return error;
 }
 
-static void add_one_guest_instr(void)
-{
-   n_guest_instrs++;
+/*находим нужный адрес в файлеб скомпилированным из иды*/
+Int search_addr_in_file(Int fd, Addr addr){
+    Char array[50];//буферный массив для считывания построчно всего файла
+    Int error = 1;//если 0 - то чтение не произошло
+    do{
+        //находим первый адрес функции
+        error = scan_line(fd, array);
+        if (error <= 0)
+            break;
+        if(VG_(strtoll10)(array, NULL) == (addr - offset_stack)){
+            /*Успех*/
+            return 1;
+        }
+        /*если адрес не тот, то мы пропускаем все строки с аргументами*/
+        //находим количество аргументов
+        error = scan_line(fd, array);
+        if (error <= 0)
+            break;
+        Int arg_number = VG_(strtoll10)(array, NULL);
+        //пропускаем строки с ненужными нам аргументами
+        for(Int j = 0; j < arg_number; j++){
+            error = scan_line(fd, array);
+            if (error <= 0)
+                break;
+        }
+    }while(1);
+    return 0;
 }
 
+static void trace_superblock(Addr addr)
+{
+    Addr current_sp = VG_(get_SP)(1); //stack address
+    const ThreadId thread_id = VG_(get_running_tid)();
+    VexGuestArchState* vex = &(VG_(get_ThreadState)(thread_id)->arch.vex);
+    
+    Int fd = VG_(fd_open)("/home/stone-pardon/ida_arg_198.txt", VKI_O_RDONLY, 666);
+    if(search_addr_in_file(fd, addr)){
+        VG_(printf)("Sucsess! %lx\n", addr);
+        Char buf[5];
+        scan_line(fd, buf);
+        Int arg_num = VG_(strtoll10)(buf, NULL);
+        for(Int j = 0; j < arg_num; j++){
+            switch (j+1){
+                case 1:
+                    VG_(printf)("rdi - 0x%llx\n", vex->guest_RDI);
+                    break;
+                case 2:
+                    VG_(printf)("rsi - 0x%llx\n", vex->guest_RSI);
+                    break;
+                case 3:
+                    VG_(printf)("rcx - 0x%llx\n", vex->guest_RCX);
+                    break;
+                case 4:
+                    VG_(printf)("rdx - 0x%llx\n", vex->guest_RDX);
+                    break;
+                case 5:
+                    VG_(printf)("r8  - 0x%llx\n", vex->guest_R8);
+                    break;
+                case 6:
+                    VG_(printf)("r9  - 0x%llx\n", vex->guest_R9);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    VG_(close)(fd);
+//         XArray*  blocks = VG_(di_get_stack_blocks_at_ip)( current_sp, 0);//take array of StackBlock
+//         if (blocks!= NULL && VG_(sizeXA)(blocks) != 0) {
+//             VG_(printf)("stack %lx - %lx \n", addr, current_sp);
+//         }
+       // VG_(printf)("%lx - %lx \n", addr, current_sp);
+    clo_trace_sbs = False;
+}
 
 /*------------------------------------------------------------*/
 /*--- Basic tool functions                                 ---*/
@@ -44,115 +127,68 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
                       const VexArchInfo* archinfo_host,
                       IRType gWordTy, IRType hWordTy )
 {
-   IRDirty*   di;
-   Int        i;
-   IRSB*      sbOut;
-   IRTypeEnv* tyenv = sbIn->tyenv;
-   Addr       iaddr = 0, dst;
-   UInt       ilen = 0;
-   Bool       condition_inverted = False;
-   DiEpoch    ep = VG_(current_DiEpoch)();
 
-   if (gWordTy != hWordTy) {
-      /* We don't currently support this case. */
-      VG_(tool_panic)("host/guest word size mismatch");
-   }
+   //print fn address in runtime
+    if (clo_trace_sbs){
+        IRDirty*   di;
+        Int        i;
+        IRSB*      sbOut;
+        IRTypeEnv* tyenv = sbIn->tyenv;
 
-   /* Set up SB */
-   sbOut = deepCopyIRSBExceptStmts(sbIn);
-
-   // Copy verbatim any IR preamble preceding the first IMark
-   i = 0;
-   while (i < sbIn->stmts_used && sbIn->stmts[i]->tag != Ist_IMark) {
-      addStmtToIRSB( sbOut, sbIn->stmts[i] );
-      i++;
-   }
-   
-   for (/*use current i*/; i < sbIn->stmts_used; i++) {
-      IRStmt* st = sbIn->stmts[i];
-      if (!st || st->tag == Ist_NoOp) continue;
+        /* Set up SB */
+        sbOut = deepCopyIRSBExceptStmts(sbIn);
+        i = 0;
+        while (i < sbIn->stmts_used && sbIn->stmts[i]->tag != Ist_IMark) {
+        addStmtToIRSB( sbOut, sbIn->stmts[i] );
+            i++;
+        }
+        /*get the fnptr to fnentry*/
+        di = unsafeIRDirty_0_N(0, "trace_superblock", 
+            VG_(fnptr_to_fnentry)( &trace_superblock ),
+            mkIRExprVec_1( mkIRExpr_HWord( vge->base[0])));
+        addStmtToIRSB( sbOut, IRStmt_Dirty(di) );         
+        
+        for (/*use current i*/; i < sbIn->stmts_used; i++) {
+            IRStmt* st = sbIn->stmts[i];
+            if (!st || st->tag == Ist_NoOp) continue;
       
-      switch (st->tag) {
-         case Ist_NoOp:
-         case Ist_AbiHint:
-         case Ist_Put:
-         case Ist_PutI:
-         case Ist_MBE:
-         case Ist_IMark:
-         case Ist_WrTmp:
-         case Ist_Store: 
-         case Ist_StoreG: 
-         case Ist_LoadG:
-         case Ist_Dirty:
-         case Ist_CAS: 
-         case Ist_LLSC: 
-            addStmtToIRSB( sbOut, st ); 
-            break;
-         case Ist_Exit:{
+            switch (st->tag) {
+                case Ist_NoOp:
+                case Ist_AbiHint:
+                case Ist_Put:
+                case Ist_PutI:
+                case Ist_MBE:
+                case Ist_IMark:
+                case Ist_WrTmp:
+                case Ist_Store: 
+                case Ist_LoadG: 
+                case Ist_Dirty: 
+                case Ist_CAS: 
+                case Ist_LLSC: 
+                case Ist_Exit:
+                    addStmtToIRSB( sbOut, st );      // Original statement
+                    break;
 
-            Bool guest_exit, inverted;
-            guest_exit = (st->Ist.Exit.jk == Ijk_Boring) ||
-                         (st->Ist.Exit.jk == Ijk_Call) ||
-                         (st->Ist.Exit.jk == Ijk_Ret);
+                default:
+                    ppIRStmt(st);
+                    tl_assert(0);
+            }
+        }
+        return sbOut;
+    }
 
-            if (guest_exit) {
-                /* Stuff to widen the guard expression to a host word, so
-                   we can pass it to the branch predictor simulation
-                   functions easily. */
-                IRType   tyW    = hWordTy;
-                IROp     widen  = tyW==Ity_I32  ? Iop_1Uto32  : Iop_1Uto64;
-                IROp     opXOR  = tyW==Ity_I32  ? Iop_Xor32   : Iop_Xor64;
-                IRTemp   guard1 = newIRTemp(sbOut->tyenv, Ity_I1);
-                IRTemp   guardW = newIRTemp(sbOut->tyenv, tyW);
-                IRTemp   guard  = newIRTemp(sbOut->tyenv, tyW);
-                IRExpr*  one    = tyW==Ity_I32 ? IRExpr_Const(IRConst_U32(1))
-                                               : IRExpr_Const(IRConst_U64(1));
-
-                /* Widen the guard expression. */
-                addStmtToIRSB( sbOut,
-                               IRStmt_WrTmp( guard1, st->Ist.Exit.guard ));
-                addStmtToIRSB( sbOut,
-                               IRStmt_WrTmp( guardW,
-                                             IRExpr_Unop(widen,
-                                                         IRExpr_RdTmp(guard1))) );
-                /* If the exit is inverted, invert the sense of the guard. */
-                addStmtToIRSB(sbOut,
-                        IRStmt_WrTmp(
-                                guard,
-                                inverted ? IRExpr_Binop(opXOR, IRExpr_RdTmp(guardW), one)
-                                    : IRExpr_RdTmp(guardW)
-                                    ));
-            }
-            if(st->Ist.Exit.jk == Ijk_Call){
-                //IRConst*   dst = st->Ist.Exit.dst;
-                VG_(printf)("Ijk_Call \n");
-            }
-            if(st->Ist.Exit.jk == Ijk_Ret){
-                //IRConst*   dst = st->Ist.Exit.dst;
-                VG_(printf)("Ijk_Ret \n");
-            }
-            if(st->Ist.Exit.jk == Ijk_INVALID){
-                //IRConst*   dst = st->Ist.Exit.dst;
-                VG_(printf)("Ijk_INVALID \n");
-            }
-            if(st->Ist.Exit.jk == Ijk_NoDecode){
-                //IRConst*   dst = st->Ist.Exit.dst;
-                VG_(printf)("Ijk_NoDecode \n");
-            }
-//             if(st->Ist.Exit.jk == Ijk_Boring){
-//                 IRConst*   dst = st->Ist.Exit.dst;
-//                 VG_(printf)("Ijk_Boring \n");
-//             }
-             
-            addStmtToIRSB( sbOut, st );
-            break;
-         }
-         default:
-            ppIRStmt(st);
-            tl_assert(0);
-      }
-   }
-   return sbOut;
+    if(sbIn->jumpkind == Ijk_Call) {
+        /* Print this superblock's address. */
+            clo_trace_sbs = True;           
+//         }
+//         else {
+//             VG_(printf)("Call jump in the address - ");
+//             ppIRExpr(sbIn->next);
+//             VG_(printf)("\n");
+//             VG_(printf)("\n");
+//         }
+    }
+    return sbIn;
 }
 
 static void lk_fini(Int exitcode)
@@ -176,9 +212,6 @@ static void lk_pre_clo_init(void)
                                    lk_instrument,
                                    lk_fini);
 
-   /*VG_(needs_command_line_options)(lk_process_cmd_line_option,
-                                   lk_print_usage,
-                                   lk_print_debug_usage);*/
 }
 
 VG_DETERMINE_INTERFACE_VERSION(lk_pre_clo_init)
