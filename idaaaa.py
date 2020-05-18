@@ -82,7 +82,13 @@ def argloc_info(data):
         return rez
 
 #print "Hello? world!"
-with open("ida_arg_198.txt", "w+") as opening:
+fname = idc.AskStr(".txt", "Enter a file name")
+if fname == None:
+    print "Defalt file name is ida_for_pro.txt"
+    fname = "ida_for_pro.txt"
+else:
+	print fname
+with open(fname, "w+") as opening:
     start_count_read = opening.read()
     for segea in Segments():
         for funcea in Functions(segea, SegEnd(segea)):
@@ -97,7 +103,7 @@ with open("ida_arg_198.txt", "w+") as opening:
                 info_str = str(funcea) + "\n"
                 info_str += str(int(funcdata.size())) + "\n"
                 for i in xrange(funcdata.size()):
-                    info_str += str(i) + " " + print_tinfo('', 0, 0, PRTYPE_1LINE, funcdata[i].type, '', '') + "\n"
+                    info_str += print_tinfo('', 0, 0, PRTYPE_1LINE, funcdata[i].type, '', '') + "\n"
                 start_count_write = opening.write(bytes(info_str))
             if funcdata.size() == 0:
                 f = idaapi.get_func(funcea)
@@ -114,7 +120,7 @@ with open("ida_arg_198.txt", "w+") as opening:
                             info_str = str(funcea) + "\n"
                             info_str += str(len(arg)) + "\n"
                             for j in xrange(len(arg)):
-                                info_str += str(j) + " " + arg[j] + "\n"
+                                info_str += arg[j] + "\n"
                             start_count_write = opening.write(bytes(info_str))
                         break
                 
