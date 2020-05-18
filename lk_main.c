@@ -15,14 +15,15 @@
 /*------------------------------------------------------------*/
 /*--- Stuff for basic-counts                               ---*/
 /*------------------------------------------------------------*/
-
+Long offset_stack = 1081344;
+Char *fname = "ida_arg_198.txt";
 
 
 /*------------------------------------------------------------*/
 /*--- Stuff for trace-superblocks                          ---*/
 /*------------------------------------------------------------*/
 static Bool clo_trace_sbs = False;
-Long offset_stack = 1081344;
+
 
 
 Int scan_line(Int fd, Char *buf){
@@ -70,32 +71,35 @@ static void trace_superblock(Addr addr)
     Addr current_sp = VG_(get_SP)(1); //stack address
     const ThreadId thread_id = VG_(get_running_tid)();
     VexGuestArchState* vex = &(VG_(get_ThreadState)(thread_id)->arch.vex);
-    
-    Int fd = VG_(fd_open)("/home/stone-pardon/ida_arg_198.txt", VKI_O_RDONLY, 666);
+    // VG_(printf)("valgrind_stack_base %lx\n", VG_(get_ThreadState)(thread_id)->os_state.valgrind_stack_base);
+    // VG_(printf)("valgrind_stack_init_SP %lx\n", VG_(get_ThreadState)(thread_id)->os_state.valgrind_stack_init_SP);
+    Int fd = VG_(fd_open)(fname, VKI_O_RDONLY, 666);
     if(search_addr_in_file(fd, addr)){
-        VG_(printf)("Sucsess! %lx\n", addr);
+        VG_(printf)("Sucsess!naddr %lx\n", addr);
         Char buf[5];
         scan_line(fd, buf);
         Int arg_num = VG_(strtoll10)(buf, NULL);
         for(Int j = 0; j < arg_num; j++){
+            char arg[50];
+            scan_line(fd, arg);
             switch (j+1){
                 case 1:
-                    VG_(printf)("rdi - 0x%llx\n", vex->guest_RDI);
+                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDI);
                     break;
                 case 2:
-                    VG_(printf)("rsi - 0x%llx\n", vex->guest_RSI);
+                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RSI);
                     break;
                 case 3:
-                    VG_(printf)("rcx - 0x%llx\n", vex->guest_RCX);
+                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RCX);
                     break;
                 case 4:
-                    VG_(printf)("rdx - 0x%llx\n", vex->guest_RDX);
+                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDX);
                     break;
                 case 5:
-                    VG_(printf)("r8  - 0x%llx\n", vex->guest_R8);
+                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R8);
                     break;
                 case 6:
-                    VG_(printf)("r9  - 0x%llx\n", vex->guest_R9);
+                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R9);
                     break;
                 default:
                     break;
