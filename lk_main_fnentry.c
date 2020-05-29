@@ -25,10 +25,7 @@ static void trace_superblock(Addr addr)
 {
     Addr current_sp = VG_(get_SP)(1); //stack address
     if (VG_(has_CF_info)(addr)){
-//         XArray*  blocks = VG_(di_get_stack_blocks_at_ip)( current_sp, 0);//take array of StackBlock
-//         if (blocks!= NULL && VG_(sizeXA)(blocks) != 0) {
-//             VG_(printf)("stack %lx - %lx \n", addr, current_sp);
-//         }
+
         VG_(printf)("%lx - %lx \n", addr, current_sp);
         
     }   
