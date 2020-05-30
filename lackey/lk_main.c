@@ -12,15 +12,38 @@
 #include "pub_tool_libcbase.h"
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
-//#include "pub_tool_xarray.h"   // XArray
+#include "pub_tool_xarray.h"   // XArray
 
 
+/*------------------------------------------------------------*/
+/*--- Command line options                                 ---*/
+/*------------------------------------------------------------*/
+static const HChar* fname = "ida_arg.txt";
+
+static Bool lk_process_cmd_line_option(const HChar* arg)
+{
+   if VG_STR_CLO(arg, "--fname", fname) {}
+   else return False;
+   
+   tl_assert(fname);
+   tl_assert(fname[0]);
+   return True;
+}
+
+static void lk_print_usage(void)
+{  
+   VG_(printf)("    --fname=<name>           input file <name> \n");
+}
+
+static void lk_print_debug_usage(void)
+{  
+   VG_(printf)("    (none)\n");
+}
 
 /*------------------------------------------------------------*/
 /*--- Stuff for basic-counts                               ---*/
 /*------------------------------------------------------------*/
 Long offset_stack = 1081344;
-Char *fname = "new_ida_arg.txt";
 //static Bool reg_flag =  False; //flag to test pointer
 
 
@@ -161,34 +184,47 @@ static void trace_superblock(Addr addr)
                     VG_(printf)("-8   %lx\n", *((int *)(in_reg_value - 8)));
                     VG_(printf)("0    %lx\n\n", *((int *)(in_reg_value )));
 
-                    DebugInfo *di = VG_(find_DebugInfo)(VG_(current_DiEpoch)() , *((int *)(in_reg_value )));
-
-                    if ( di != NULL){
-                        VG_(printf)("I have debuginfo!!!\n");
-                        VG_(printf)("%s\n",VG_(DebugInfo_get_soname)( di ));
-                        VG_(printf)("%s\n",VG_(DebugInfo_get_filename)( di ));
-                        //VG_(printf)("%d\n",VG_(DebugInfo_get_Mapping_rx)( di ));
-                        //VG_(printf)("Addr avma %lx\n",VG_(DebugInfo_get_Mapping_avma)( di));
-                        // UInt linenum;
-                        // if(VG_(get_linenum)( VG_(current_DiEpoch)(), addr, &linenum)){
-                        //     VG_(printf)("linenum %lx = %lx\n",addr, linenum );
-                        // }
-
-                        VG_(printf)("text addr - %lx size - %lx\n", VG_(DebugInfo_get_text_avma)(di), VG_(DebugInfo_get_text_size)(di));
-                        // VG_(printf)("got addr - %lx size - %lx\n", VG_(DebugInfo_get_got_avma)(di), VG_(DebugInfo_get_got_size)(di));
-                        VG_(printf)("got addr - %lx \n", VG_(DebugInfo_get_got_avma)(di));
-                        VG_(printf)("gotplt addr - %lx \n", VG_(DebugInfo_get_gotplt_avma)(di));
-                        VG_(printf)("plt addr - %lx \n", VG_(DebugInfo_get_plt_avma)(di));
-                        // VG_(printf)("data addr - %lx\n", VG_(DebugInfo_get_data_avma)(di));
-                        // VG_(printf)("sdata addr - %lx\n", VG_(DebugInfo_get_sdata_avma)(di));
-                        // VG_(printf)("rodata addr - %lx, size - %lx\n", VG_(DebugInfo_get_rodata_avma)(di), VG_(DebugInfo_get_rodata_size)(di));
-                        DebugInfoMapping* deb_map_info = ML_(find_rx_mapping)( di, *((int *)(in_reg_value)), *((int *)(in_reg_value)));
-                        if(deb_map_info != NULL){
-                            VG_(printf)("I look in mapping!!!\n %lx - addr \n", deb_map_info->avma);
-                        }
-                        
-                    }
+                    DebugInfo *di = VG_(find_DebugInfo)(VG_(current_DiEpoch)() , *((int *)(in_reg_value)) );
                     
+                    while (di != NULL){
+                    
+                        for (UInt i = 0; i < VG_(sizeXA)(di->fsm.maps); i++) {
+                           DebugInfoMapping* map = VG_(indexXA)(di->fsm.maps, i);
+                           VG_(printf)("mapping %18lx - %18lx\n", map->avma, map->avma + map->size);
+                           VG_(printf)("rx - %d  rw - %d  ro - %d\n",map->rx, map->rw, map->ro);
+                           // if (   map->rx && map->size > 0
+                           //     && lo >= map->avma && hi < map->avma + map->size) {
+                           //    di->last_rx_map = map;
+                           //    return map;
+                           // }
+                        }
+                        di = di->next;
+                    }
+
+                    // if ( di != NULL){G_(printf)("mapping %18lx - %18lx, \n")
+                    //     VG_(printf)("New version!\nI have debuginfo!!!\n");
+                    //     VG_(printf)("%s\n",VG_(DebugInfo_get_soname)( di ));
+                    //     VG_(printf)("%s\n",VG_(DebugInfo_get_filename)( di ));
+                    //     //VG_(printf)("%d\n",VG_(DebugInfo_get_Mapping_rx)( di ));
+                    //     //VG_(printf)("Addr avma %lx\n",VG_(DebugInfo_get_Mapping_avma)( di));
+                    //     // UInt linenum;
+                    //     // if(VG_(get_linenum)( VG_(current_DiEpoch)(), addr, &linenum)){
+                    //     //     VG_(printf)("linenum %lx = %lx\n",addr, linenum );
+                    //     // }
+
+                    //     VG_(printf)("text addr - %lx size - %lx\n", VG_(DebugInfo_get_text_avma)(di), VG_(DebugInfo_get_text_size)(di));
+                    //     // VG_(printf)("got addr - %lx size - %lx\n", VG_(DebugInfo_get_got_avma)(di), VG_(DebugInfo_get_got_size)(di));
+                    //     VG_(printf)("got addr - %lx \n", VG_(DebugInfo_get_got_avma)(di));
+                    //     VG_(printf)("gotplt addr - %lx \n", VG_(DebugInfo_get_gotplt_avma)(di));
+                    //     VG_(printf)("plt addr - %lx \n", VG_(DebugInfo_get_plt_avma)(di));
+                    //     // VG_(printf)("data addr - %lx\n", VG_(DebugInfo_get_data_avma)(di));
+                    //     // VG_(printf)("sdata addr - %lx\n", VG_(DebugInfo_get_sdata_avma)(di));
+                    //     // VG_(printf)("rodata addr - %lx, size - %lx\n", VG_(DebugInfo_get_rodata_avma)(di), VG_(DebugInfo_get_rodata_size)(di));
+                    //     DebugInfoMapping* deb_map_info = ML_(find_rx_mapping)( di, *((int *)(in_reg_value)), *((int *)(in_reg_value)));
+                    //     if(deb_map_info != NULL){
+                    //         VG_(printf)("I look in mapping!!!\n %lx - addr \n", deb_map_info->avma);
+                    //     }                        
+                    // }
                     
                 }
                 
@@ -313,6 +349,10 @@ static void lk_pre_clo_init(void)
    VG_(basic_tool_funcs)          (lk_post_clo_init,
                                    lk_instrument,
                                    lk_fini);
+
+   VG_(needs_command_line_options)(lk_process_cmd_line_option,
+                                   lk_print_usage,
+                                   lk_print_debug_usage);
 
 }
 

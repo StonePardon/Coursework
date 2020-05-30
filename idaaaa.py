@@ -85,7 +85,7 @@ def argloc_info(data):
 fname = idc.AskStr(".txt", "Enter a file name")
 if fname == None:
     print "Defalt file name is ida_for_pro.txt"
-    fname = "ida_for_pro.txt"
+    fname = "ida_arg.txt"
 else:
 	print fname
 with open(fname, "w+") as opening:
