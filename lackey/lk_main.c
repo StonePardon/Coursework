@@ -7,6 +7,8 @@
 #include "pub_tool_libcfile.h" //file open
 #include "priv_storage.h"
 #include "pub_core_threadstate.h"
+#include "pub_core_libcsignal.h"
+#include "hashmap.c"
 //#include "pub_core_mallocfree.h"
 #include "pub_tool_debuginfo.h"
 #include "pub_tool_libcbase.h"
@@ -14,11 +16,26 @@
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
 #include "pub_tool_xarray.h"   // XArray
 
+#define KEY_MAX_LENGTH (25)
+
+typedef struct _FuncEvaluateContext
+{
+    int arg_number;
+    //FuncEvaluateContext *func;
+} FuncEvaluateContext;
+
+typedef struct _EvaluateContext
+{
+    char key_string[KEY_MAX_LENGTH];
+    FuncEvaluateContext *func;
+} EvaluateContext;
+
 
 /*------------------------------------------------------------*/
 /*--- Command line options                                 ---*/
 /*------------------------------------------------------------*/
 static const HChar* fname = "ida_arg.txt";
+static map_t mymap;
 
 static Bool lk_process_cmd_line_option(const HChar* arg)
 {
@@ -31,7 +48,7 @@ static Bool lk_process_cmd_line_option(const HChar* arg)
 }
 
 static void lk_print_usage(void)
-{  
+{ 
    VG_(printf)("    --fname=<name>           input file <name> \n");
 }
 
@@ -43,23 +60,8 @@ static void lk_print_debug_usage(void)
 /*------------------------------------------------------------*/
 /*--- Stuff for basic-counts                               ---*/
 /*------------------------------------------------------------*/
-Long offset_stack = 1081344;
+//Long offset_stack = 1081344;
 //static Bool reg_flag =  False; //flag to test pointer
-
-
-/*------------------------------------------------------------*/
-/*--- Stuff for trace-superblocks                          ---*/
-/*------------------------------------------------------------*/
-static Bool clo_trace_sbs = False;
-static VG_MINIMAL_JMP_BUF(myjmpbuf);
-
-static
-void SIGSEGV_handler(int signum)
-{
-
-    VG_MINIMAL_LONGJMP(myjmpbuf);
-}
-
 
 Int scan_line(Int fd, Char *buf){
     Int current_index = -1;//указывает размер считаной строки
@@ -81,7 +83,7 @@ Int search_addr_in_file(Int fd, Addr addr){
         error = scan_line(fd, array);
         if (error <= 0)
             break;
-        if(VG_(strtoll10)(array, NULL) == (addr - offset_stack)){
+        if(VG_(strtoll10)(array, NULL) == (addr /* offset_stack*/)){
             /*Успех*/
             return 1;
         }
@@ -101,143 +103,154 @@ Int search_addr_in_file(Int fd, Addr addr){
     return 0;
 }
 
-static void trace_superblock(Addr addr)
+
+/*------------------------------------------------------------*/
+/*--- Stuff for trace-superblocks                          ---*/
+/*------------------------------------------------------------*/
+static Bool clo_trace_sbs = False;
+static Bool pointer_flag = False;
+static VG_MINIMAL_JMP_BUF(myjmpbuf);
+
+
+static void SIGSEGV_handler(Int signum)
 {
+    VG_(printf)("I catch a signal!!!\n");
+    VG_MINIMAL_LONGJMP(myjmpbuf);
+    pointer_flag = False;
+}
+
+Bool test_pointer(Long value){
+    vki_sigaction_toK_t sigsegv_new;
+    vki_sigaction_fromK_t sigsegv_saved;
+
+    Int res;
+    /* Install own SIGSEGV handler */
+    sigsegv_new.ksa_handler  = &SIGSEGV_handler;
+    //((void(*)(Int)) sigsegv_new.ksa_handler) (1);
+    sigsegv_new.sa_flags    = 0;
+    sigsegv_new.sa_restorer = NULL;
+
+    res = VG_(sigemptyset)( &sigsegv_new.sa_mask);
+    tl_assert(res == 0);
+
+    res = VG_(sigaction)( VKI_SIGSEGV, &sigsegv_new, NULL);
+    tl_assert(res == 0);
+
+    /*сама проверка*/
+    if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
+        Long new = *((Long *) value);
+        VG_(printf)("pointer %llx\n", new);
+        return True;
+    } else
+        return False;
+}
+
+Long get_arg_value(VexGuestArchState* vex, Int fd, Int j){
+    char arg[50];
+    //scan_line(fd, arg);
+    switch (j+1){
+        case 1:
+            //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDI);
+            return vex->guest_RDI;
+        case 2:
+            //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RSI);
+            return vex->guest_RSI;
+        case 3:
+            //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RCX);
+            return vex->guest_RCX;
+        case 4:
+            //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDX);
+            return vex->guest_RDX;
+        case 5:
+            //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R8);
+            return vex->guest_R8;
+        case 6:
+            //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R9);
+            return vex->guest_R9;
+        default:
+            return 0;
+    }
+
+}
+
+
+static void evaluate_function(Addr addr)
+{
+    DebugInfo *di = VG_(find_DebugInfo)(VG_(current_DiEpoch)() , addr);
+    if(di == NULL){
+        clo_trace_sbs = False;
+        return 0;
+    }
+    EvaluateContext* evcon;
+    Char key_string[KEY_MAX_LENGTH];
+    /*we need the loading address of the text section 
+    to calculate the address of the function without an offset.*/
+    VG_(snprintf)(key_string, KEY_MAX_LENGTH,"%lld", addr - di->text_bias);
+
+    Int error = hashmap_get(mymap, key_string, (void**)(&evcon));
+    //not such element
+    if (error){
+        clo_trace_sbs = False;
+        return 0;
+    }
+    //VG_(printf)("addr - %s\n",key_string);
+
     const ThreadId thread_id = VG_(get_running_tid)();
     VexGuestArchState* vex = &(VG_(get_ThreadState)(thread_id)->arch.vex);
     Addr current_sp = VG_(get_SP)(thread_id); //stack address
-    Int fd = VG_(fd_open)(fname, VKI_O_RDONLY, 666);
-    if(addr == 0x1092a9 && search_addr_in_file(fd, addr) ){
-        // VG_(printf)("valgrind_stack_base %lx\n", VG_(get_ThreadState)(thread_id)->os_state.valgrind_stack_base);
-        // VG_(printf)("valgrind_stack_init_SP %lx\n", VG_(get_ThreadState)(thread_id)->os_state.valgrind_stack_init_SP);
-        // VG_(printf)("client_stack_highest_byte %lx\n", VG_(get_ThreadState)(thread_id)->client_stack_highest_byte); 
-        VG_(printf)("Sucsess! addr %lx\n", addr);
-        Char buf[5];
-        scan_line(fd, buf);
-        Int arg_num = VG_(strtoll10)(buf, NULL);
-        for(Int j = 0; j < arg_num; j++){
-            char arg[50];
-            Long arg_value;
-            scan_line(fd, arg);
-            switch (j+1){
-                case 1:
-                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDI);
-                    arg_value = vex->guest_RDI;
-                    // XArray*  blocks = VG_(di_get_stack_blocks_at_ip)( vex->guest_RDI, 0);//take array of StackBlock
-                    // if (blocks!= NULL ) {
 
-                    // XArray *x = VG_(newXA)( VG_(malloc), "addr.descr1",
-                    // VG_(free), sizeof(HChar) );
-                    // XArray *y = VG_(newXA)( VG_(malloc), "addr.descr2",
-                    // VG_(free), sizeof(HChar) );
-                    // if(VG_(get_data_description)(x,y, VG_(current_DiEpoch)(), vex->guest_RDI)){
-                    //      VG_(printf)("!! %s %s\n", x, y);
-                    // }
-                    break;
-                case 2:
-                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RSI);
-                    arg_value = vex->guest_RSI;
-                    break;
-                case 3:
-                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RCX);
-                    arg_value = vex->guest_RCX;
-                    break;
-                case 4:
-                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDX);
-                    arg_value = vex->guest_RDX;
-                    break;
-                case 5:
-                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R8);
-                    arg_value = vex->guest_R8;
-                    break;
-                case 6:
-                    VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R9);
-                    arg_value = vex->guest_R9;
-                    break;
-                default:
-                    break;
-            }
-            //проверка на указатель - если значение можно разименовать, то перед нами указатель
-            //ограничение на значение указателя - он не может быть меньше 1000000
-            if (arg_value & 0x1fff000000){
-                /*обработчик сигналов при неверном разименовании, чтобы програма продолжала работать*/
-                vki_sigaction_toK_t sigsegv_new;
-                vki_sigaction_fromK_t sigsegv_saved;
-
-                Int res;
-                /* Install own SIGSEGV handler */
-                sigsegv_new.ksa_handler  = SIGSEGV_handler;
-                sigsegv_new.sa_flags    = 0;
-                sigsegv_new.sa_restorer = NULL;
-
-                res = VG_(sigemptyset)( &sigsegv_new.sa_mask);
-                tl_assert(res == 0);
-
-                res = VG_(sigaction)( VKI_SIGSEGV, &sigsegv_new, &sigsegv_saved);
-                tl_assert(res == 0);
-                Int in_reg_value = -1;
-                /*сама проверка*/
-                if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
-                    in_reg_value = *((int *)(arg_value));
-                    VG_(printf)("pointer %lx - %lx \n", arg_value, in_reg_value);
-                    VG_(printf)("-16  %lx\n", *((int *)(in_reg_value - 16)));
-                    VG_(printf)("-8   %lx\n", *((int *)(in_reg_value - 8)));
-                    VG_(printf)("0    %lx\n\n", *((int *)(in_reg_value )));
-
-                    DebugInfo *di = VG_(find_DebugInfo)(VG_(current_DiEpoch)() , *((int *)(in_reg_value)) );
-                    
-                    while (di != NULL){
-                    
-                        for (UInt i = 0; i < VG_(sizeXA)(di->fsm.maps); i++) {
-                           DebugInfoMapping* map = VG_(indexXA)(di->fsm.maps, i);
-                           VG_(printf)("mapping %18lx - %18lx\n", map->avma, map->avma + map->size);
-                           VG_(printf)("rx - %d  rw - %d  ro - %d\n",map->rx, map->rw, map->ro);
-                           // if (   map->rx && map->size > 0
-                           //     && lo >= map->avma && hi < map->avma + map->size) {
-                           //    di->last_rx_map = map;
-                           //    return map;
-                           // }
-                        }
-                        di = di->next;
-                    }
-
-                    // if ( di != NULL){G_(printf)("mapping %18lx - %18lx, \n")
-                    //     VG_(printf)("New version!\nI have debuginfo!!!\n");
-                    //     VG_(printf)("%s\n",VG_(DebugInfo_get_soname)( di ));
-                    //     VG_(printf)("%s\n",VG_(DebugInfo_get_filename)( di ));
-                    //     //VG_(printf)("%d\n",VG_(DebugInfo_get_Mapping_rx)( di ));
-                    //     //VG_(printf)("Addr avma %lx\n",VG_(DebugInfo_get_Mapping_avma)( di));
-                    //     // UInt linenum;
-                    //     // if(VG_(get_linenum)( VG_(current_DiEpoch)(), addr, &linenum)){
-                    //     //     VG_(printf)("linenum %lx = %lx\n",addr, linenum );
-                    //     // }
-
-                    //     VG_(printf)("text addr - %lx size - %lx\n", VG_(DebugInfo_get_text_avma)(di), VG_(DebugInfo_get_text_size)(di));
-                    //     // VG_(printf)("got addr - %lx size - %lx\n", VG_(DebugInfo_get_got_avma)(di), VG_(DebugInfo_get_got_size)(di));
-                    //     VG_(printf)("got addr - %lx \n", VG_(DebugInfo_get_got_avma)(di));
-                    //     VG_(printf)("gotplt addr - %lx \n", VG_(DebugInfo_get_gotplt_avma)(di));
-                    //     VG_(printf)("plt addr - %lx \n", VG_(DebugInfo_get_plt_avma)(di));
-                    //     // VG_(printf)("data addr - %lx\n", VG_(DebugInfo_get_data_avma)(di));
-                    //     // VG_(printf)("sdata addr - %lx\n", VG_(DebugInfo_get_sdata_avma)(di));
-                    //     // VG_(printf)("rodata addr - %lx, size - %lx\n", VG_(DebugInfo_get_rodata_avma)(di), VG_(DebugInfo_get_rodata_size)(di));
-                    //     DebugInfoMapping* deb_map_info = ML_(find_rx_mapping)( di, *((int *)(in_reg_value)), *((int *)(in_reg_value)));
-                    //     if(deb_map_info != NULL){
-                    //         VG_(printf)("I look in mapping!!!\n %lx - addr \n", deb_map_info->avma);
-                    //     }                        
-                    // }
-                    
-                }
-                
-            }
-        }
-    }
-    VG_(close)(fd);
-//         XArray*  blocks = VG_(di_get_stack_blocks_at_ip)( current_sp, 0);//take array of StackBlock
-//         if (blocks!= NULL && VG_(sizeXA)(blocks) != 0) {
-//             VG_(printf)("stack %lx - %lx \n", addr, current_sp);
-//         }
-       // VG_(printf)("%lx - %lx \n", addr, current_sp);
+    //VG_(printf)("Sucsess! addr %lx\n", addr);
+    // Char buf[5];
+    // scan_line(fd, buf);
+    // Int arg_num = VG_(strtoll10)(buf, NULL);
+    // for(Int j = 0; j < arg_num; j++){
+    //     //get argument value from register or stack
+    //     Long arg_value = get_arg_value(vex, fd, j);
+    //     //if(test_pointer(arg_value)){
+    //     //    VG_(printf)("Have pointer\n");
+    //     //}
+    // }
     clo_trace_sbs = False;
+}
+
+
+void init_hashmap(map_t mymap){
+
+    Int fd = VG_(fd_open)(fname, VKI_O_RDONLY, 666);
+    tl_assert(fd != NULL);
+
+    EvaluateContext* value;
+    Char array[50];//буферный массив для считывания построчно всего файла
+    Int error = 1;//если 0 - то чтение не произошло
+    do{
+        //find func address
+        error = scan_line(fd, array);
+        if (error <= 0)
+            break;
+        value = VG_(malloc)("ev.con",sizeof(EvaluateContext));
+        VG_(snprintf)(value->key_string, KEY_MAX_LENGTH, "%lld", VG_(strtoll10)(array, NULL));
+
+        //находим количество аргументов
+        error = scan_line(fd, array);
+        if (error <= 0)
+            break;
+        Int arg_number = VG_(strtoll10)(array, NULL);
+        value->func = VG_(malloc)("fun.ev.con",sizeof(FuncEvaluateContext));
+        value->func->arg_number = arg_number;
+
+        //return 0 if successful
+        error = hashmap_put(mymap, value->key_string, value);
+        tl_assert(error == 0);
+
+        //пропускаем строки с ненужными нам аргументами
+        for(Int j = 0; j < arg_number; j++){
+            error = scan_line(fd, array);
+            if (error <= 0)
+                break;
+        }
+    }while(1);
+
+    VG_(close)(fd);
 }
 
 /*------------------------------------------------------------*/
@@ -272,60 +285,23 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
             i++;
         }
         /*get the fnptr to fnentry*/
-        di = unsafeIRDirty_0_N(0, "trace_superblock", 
-            VG_(fnptr_to_fnentry)( &trace_superblock ),
+        di = unsafeIRDirty_0_N(0, "evaluate_function", 
+            VG_(fnptr_to_fnentry)( &evaluate_function ),
             mkIRExprVec_1( mkIRExpr_HWord( vge->base[0])));
         addStmtToIRSB( sbOut, IRStmt_Dirty(di) );
-
-        // XArray *x = VG_(newXA)( VG_(malloc), "addr.descr1",
-        // VG_(free), sizeof(HChar) );
-        // XArray *y = VG_(newXA)( VG_(malloc), "addr.descr2",
-        // VG_(free), sizeof(HChar) );
-        // Addr aaa = 0x1fff0004e0;
-        // if(VG_(get_data_description)(x,y, VG_(current_DiEpoch)(), aaa)){
-        //      VG_(printf)("!! %s %s\n", x, y);
-        // }       
-        
+      
         for (/*use current i*/; i < sbIn->stmts_used; i++) {
             IRStmt* st = sbIn->stmts[i];
             if (!st || st->tag == Ist_NoOp) continue;
-      
-            switch (st->tag) {
-                case Ist_NoOp:
-                case Ist_AbiHint:
-                case Ist_Put:
-                case Ist_PutI:
-                case Ist_MBE:
-                case Ist_IMark:
-                case Ist_WrTmp:
-                case Ist_Store: 
-                case Ist_LoadG: 
-                case Ist_Dirty: 
-                case Ist_CAS: 
-                case Ist_LLSC: 
-                case Ist_Exit:
-                    addStmtToIRSB( sbOut, st );      // Original statement
-                    break;
-
-                default:
-                    ppIRStmt(st);
-                    tl_assert(0);
-            }
+            addStmtToIRSB( sbOut, st );      // Original statement
         }
         return sbOut;
     }
 
-    if(sbIn->jumpkind == Ijk_Call) {
-        /* Print this superblock's address. */
-            clo_trace_sbs = True;           
-//         }
-//         else {
-//             VG_(printf)("Call jump in the address - ");
-//             ppIRExpr(sbIn->next);
-//             VG_(printf)("\n");
-//             VG_(printf)("\n");
-//         }
-    }
+    if (sbIn->jumpkind == Ijk_Call) {
+        /* flag - next block is function */
+        clo_trace_sbs = True;   
+    }        
     return sbIn;
 }
 
@@ -339,7 +315,7 @@ static void lk_pre_clo_init(void)
    VG_(details_version)         (NULL);
    VG_(details_description)     ("my new Valgrind tool");
    VG_(details_copyright_author)(
-      "Copyright (C) 2020, and GNU GPL'd, by SECSEM.");
+      "Copyright (C) 2020, and GNU GPL'd, by Barbara Akhapkina and Michael Voronov");
    VG_(details_bug_reports_to)  (VG_BUGS_TO);
    VG_(details_avg_translation_sizeB) ( 200 );
    
@@ -353,6 +329,11 @@ static void lk_pre_clo_init(void)
    VG_(needs_command_line_options)(lk_process_cmd_line_option,
                                    lk_print_usage,
                                    lk_print_debug_usage);
+
+    
+    mymap = hashmap_new();
+    init_hashmap(mymap);
+    //hashmap_free(mymap);
 
 }
 
