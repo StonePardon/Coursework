@@ -18,15 +18,22 @@
 
 #define KEY_MAX_LENGTH (25)
 
+typedef struct _ArgContext {
+    Long *values;
+    Long number_used_values;
+    Long max_number_values;
+    //feature_map: 
+} ArgContext;
+
 typedef struct _FuncEvaluateContext
 {
-    int arg_number;
-    //FuncEvaluateContext *func;
+    Int arg_number;
+    ArgContext *arg_contexts;
 } FuncEvaluateContext;
 
 typedef struct _EvaluateContext
 {
-    char key_string[KEY_MAX_LENGTH];
+    Char key_string[KEY_MAX_LENGTH];
     FuncEvaluateContext *func;
 } EvaluateContext;
 
@@ -58,57 +65,10 @@ static void lk_print_debug_usage(void)
 }
 
 /*------------------------------------------------------------*/
-/*--- Stuff for basic-counts                               ---*/
+/*--- Stuff for heurictics                                 ---*/
 /*------------------------------------------------------------*/
-//Long offset_stack = 1081344;
-//static Bool reg_flag =  False; //flag to test pointer
-
-Int scan_line(Int fd, Char *buf){
-    Int current_index = -1;//указывает размер считаной строки
-    Int error;
-    //находим первый переход строки или обнаруживаем конец файла
-    do{ 
-        current_index++;
-        error = VG_(read)(fd, buf + current_index, 1);
-    } while(error > 0 && buf[current_index] != '\n');
-    return error;
-}
-
-/*находим нужный адрес в файлеб скомпилированным из иды*/
-Int search_addr_in_file(Int fd, Addr addr){
-    Char array[50];//буферный массив для считывания построчно всего файла
-    Int error = 1;//если 0 - то чтение не произошло
-    do{
-        //находим первый адрес функции
-        error = scan_line(fd, array);
-        if (error <= 0)
-            break;
-        if(VG_(strtoll10)(array, NULL) == (addr /* offset_stack*/)){
-            /*Успех*/
-            return 1;
-        }
-        /*если адрес не тот, то мы пропускаем все строки с аргументами*/
-        //находим количество аргументов
-        error = scan_line(fd, array);
-        if (error <= 0)
-            break;
-        Int arg_number = VG_(strtoll10)(array, NULL);
-        //пропускаем строки с ненужными нам аргументами
-        for(Int j = 0; j < arg_number; j++){
-            error = scan_line(fd, array);
-            if (error <= 0)
-                break;
-        }
-    }while(1);
-    return 0;
-}
-
-
-/*------------------------------------------------------------*/
-/*--- Stuff for trace-superblocks                          ---*/
-/*------------------------------------------------------------*/
-static Bool clo_trace_sbs = False;
 static Bool pointer_flag = False;
+static Long fn_counts = 0;
 static VG_MINIMAL_JMP_BUF(myjmpbuf);
 
 
@@ -119,7 +79,7 @@ static void SIGSEGV_handler(Int signum)
     pointer_flag = False;
 }
 
-Bool test_pointer(Long value){
+Bool heurictic_pointer(ArgContext *arg_context, Long value){
     vki_sigaction_toK_t sigsegv_new;
     vki_sigaction_fromK_t sigsegv_saved;
 
@@ -139,15 +99,30 @@ Bool test_pointer(Long value){
     /*сама проверка*/
     if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
         Long new = *((Long *) value);
-        VG_(printf)("pointer %llx\n", new);
+        //VG_(printf)("pointer %llx\n", new);
+        Long neww = new;
         return True;
     } else
+        VG_(printf)("Its not a pointer\n");
         return False;
 }
 
-Long get_arg_value(VexGuestArchState* vex, Int fd, Int j){
-    char arg[50];
-    //scan_line(fd, arg);
+
+void arg_evalute_fsm(ArgContext *arg_context, Long arg_value) {
+    heurictic_pointer(arg_context, arg_value);
+    //heurictic_stack_heap(arg_context, arg_value);
+    //heurictic_3(arg_context, arg_value);
+}
+
+
+
+/*------------------------------------------------------------*/
+/*--- Stuff for trace-argyments                            ---*/
+/*------------------------------------------------------------*/
+static Bool clo_trace_sbs = False;
+
+
+Long get_arg_value(VexGuestArchState* vex, Int j){
     switch (j+1){
         case 1:
             //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_RDI);
@@ -168,9 +143,12 @@ Long get_arg_value(VexGuestArchState* vex, Int fd, Int j){
             //VG_(printf)("%s - 0x%llx\n", arg, vex->guest_R9);
             return vex->guest_R9;
         default:
-            return 0;
+            break;
     }
-
+    const ThreadId thread_id = VG_(get_running_tid)();
+    Addr current_sp = VG_(get_SP)(thread_id); //stack address
+    UInt offset = 8 * (1 + j - 6);
+    return *((Long *)current_sp + offset);
 }
 
 
@@ -189,7 +167,7 @@ static void evaluate_function(Addr addr)
 
     Int error = hashmap_get(mymap, key_string, (void**)(&evcon));
     //not such element
-    if (error){
+    if (error || evcon->func == NULL){
         clo_trace_sbs = False;
         return 0;
     }
@@ -197,20 +175,58 @@ static void evaluate_function(Addr addr)
 
     const ThreadId thread_id = VG_(get_running_tid)();
     VexGuestArchState* vex = &(VG_(get_ThreadState)(thread_id)->arch.vex);
-    Addr current_sp = VG_(get_SP)(thread_id); //stack address
+    
 
-    //VG_(printf)("Sucsess! addr %lx\n", addr);
-    // Char buf[5];
-    // scan_line(fd, buf);
-    // Int arg_num = VG_(strtoll10)(buf, NULL);
-    // for(Int j = 0; j < arg_num; j++){
-    //     //get argument value from register or stack
-    //     Long arg_value = get_arg_value(vex, fd, j);
-    //     //if(test_pointer(arg_value)){
-    //     //    VG_(printf)("Have pointer\n");
-    //     //}
-    // }
+    Int arg_num = evcon->func->arg_number;
+    tl_assert(arg_num != 0);
+    ArgContext *argcon = evcon->func->arg_contexts;
+    if(argcon == NULL){
+        argcon = (ArgContext *)VG_(calloc)("arg.con", arg_num, sizeof(ArgContext));
+        for(Int i = 0; i < arg_num; i++){
+            argcon[i].number_used_values = 0;
+            argcon[i].max_number_values = 10;
+            argcon[i].values = (Long *) VG_(calloc)("arg.con.val", argcon[i].max_number_values, sizeof(Long));
+            tl_assert(argcon[i].values != NULL);
+        }
+    }
+
+
+    //get argument value from register or stack
+    for(Int j = 0; j < arg_num; j++){
+        Long arg_value = get_arg_value(vex, j);
+
+        tl_assert(argcon[j].number_used_values < argcon[j].max_number_values);
+
+        Long* argc = argcon[j].values;
+        argc[argcon[j].number_used_values] = arg_value;
+        argcon[j].number_used_values++;
+
+        if(argcon[j].number_used_values >= argcon[j].max_number_values){
+            argc = VG_(realloc)("arg.con.val", argc, argcon[j].max_number_values * 2 * sizeof(Long));
+            argcon[j].max_number_values *= 2;
+            argcon[j].values = argc;
+        }
+        
+        arg_evalute_fsm(&argcon[j], arg_value); 
+    }
     clo_trace_sbs = False;
+}
+
+
+/*------------------------------------------------------------*/
+/*--- Stuff for mapping                                    ---*/
+/*------------------------------------------------------------*/
+
+
+Int scan_line(Int fd, Char *buf){
+    Int current_index = -1;//указывает размер считаной строки
+    Int error;
+    //находим первый переход строки или обнаруживаем конец файла
+    do{ 
+        current_index++;
+        error = VG_(read)(fd, buf + current_index, 1);
+    } while(error > 0 && buf[current_index] != '\n');
+    return error;
 }
 
 
@@ -227,7 +243,7 @@ void init_hashmap(map_t mymap){
         error = scan_line(fd, array);
         if (error <= 0)
             break;
-        value = VG_(malloc)("ev.con",sizeof(EvaluateContext));
+        value = (EvaluateContext *)VG_(malloc)("ev.con",sizeof(EvaluateContext));
         VG_(snprintf)(value->key_string, KEY_MAX_LENGTH, "%lld", VG_(strtoll10)(array, NULL));
 
         //находим количество аргументов
@@ -235,20 +251,22 @@ void init_hashmap(map_t mymap){
         if (error <= 0)
             break;
         Int arg_number = VG_(strtoll10)(array, NULL);
-        value->func = VG_(malloc)("fun.ev.con",sizeof(FuncEvaluateContext));
+        value->func = (FuncEvaluateContext *)VG_(malloc)("fun.ev.con",sizeof(FuncEvaluateContext));
         value->func->arg_number = arg_number;
+        value->func->arg_contexts = NULL;
 
         //return 0 if successful
         error = hashmap_put(mymap, value->key_string, value);
         tl_assert(error == 0);
 
+        fn_counts++;
         //пропускаем строки с ненужными нам аргументами
         for(Int j = 0; j < arg_number; j++){
             error = scan_line(fd, array);
             if (error <= 0)
                 break;
         }
-    }while(1);
+    } while(1);
 
     VG_(close)(fd);
 }
@@ -259,6 +277,23 @@ void init_hashmap(map_t mymap){
 
 static void lk_post_clo_init(void)
 {
+    // for (index=0; index<fn_counts; index+=1)
+    // {
+    //     snprintf(key_string, KEY_MAX_LENGTH, "%s%d", KEY_PREFIX, index);
+
+    //     error = hashmap_get(mymap, key_string, (void**)(&value));
+    //     printf(" %d ", error==MAP_OK);
+    //     assert(error==MAP_OK);
+
+    //     error = hashmap_remove(mymap, key_string);
+    //     printf(" %d \n", error==MAP_OK);
+    //     assert(error==MAP_OK);
+
+    //     free(value);        
+    // }
+    
+    /* Now, destroy the map */
+    //hashmap_free(mymap);
 }
 
 static
