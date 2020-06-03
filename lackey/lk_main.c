@@ -10,7 +10,6 @@
 #include "pub_core_libcsignal.h"
 #include "hashmap.c"
 #include "hashmap.h"
-//#include "pub_core_mallocfree.h"
 #include "pub_tool_debuginfo.h"
 #include "pub_tool_libcbase.h"
 #include "pub_tool_options.h"
@@ -81,16 +80,17 @@ static void lk_print_debug_usage(void)
 /*------------------------------------------------------------*/
 /*--- Stuff for heuristics                                 ---*/
 /*------------------------------------------------------------*/
-static Bool pointer_flag = False;
-static Long fn_counts = 0;
-//static VG_MINIMAL_JMP_BUF(myjmpbuf);
+static Long view_arg = 0;
+static Long pointers = 0;
+static Long virt_class = 0;
+static Long func_pointer = 0;
+static VG_MINIMAL_JMP_BUF(myjmpbuf);
 
 
 static void SIGSEGV_handler(Int signum)
 {
     VG_(printf)("I catch a signal!!!\n");
-    //VG_MINIMAL_LONGJMP(myjmpbuf);
-    //pointer_flag = False;
+    VG_MINIMAL_LONGJMP(myjmpbuf);
 }
 
 void heuristic_pointer(ArgContext *arg_context, Long value){
@@ -111,8 +111,7 @@ void heuristic_pointer(ArgContext *arg_context, Long value){
     tl_assert(res == 0);
 
     /*сама проверка*/
-   //if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
-    VG_(printf)("try to take pointer - %10llx\n", value);
+   if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
         Long new = *((long *) value);
         //VG_(printf)("pointer %llx\n", new);
         //Long neww = new;
@@ -131,11 +130,13 @@ void heuristic_stack_heap(ArgContext *arg_context, Long arg_value){
     if (arg_value <= stack_hi && stack_lo <= arg_value ) {
         arg_context->feature_map.addr_on_stack = True;
         arg_context->feature_map.pointer = True;
-        //VG_(printf)("On stack %llx\n", arg_value);
+        pointers++;
         return 0;
     }
-    if (arg_context->feature_map.pointer && !arg_context->feature_map.addr_on_stack)
+    if (arg_context->feature_map.pointer && !arg_context->feature_map.addr_on_stack){
+        pointers++;
         arg_context->feature_map.addr_on_heap = True; 
+    }
 }
 
 void heuristic_vtable(ArgContext *arg_context, Long arg_value){
@@ -165,15 +166,16 @@ void heuristic_vtable(ArgContext *arg_context, Long arg_value){
         }
         if (ML_(find_rx_mapping)(di, data_from_rw, data_from_rw) != NULL){
             arg_context->feature_map.probably_vtable = True;
+            virt_class++;
         }
     }
 }
 
 void heuristic_fn_pointer(ArgContext *arg_context, Long arg_value){
-        if(!arg_context->feature_map.pointer){
+    if(!arg_context->feature_map.pointer){
         return 0;
     }
-
+    
     Long in_arg_value = *((Long *)arg_value);
     DebugInfo *di = VG_(find_DebugInfo)(VG_(current_DiEpoch)(),in_arg_value);
     if (di == NULL){
@@ -181,6 +183,7 @@ void heuristic_fn_pointer(ArgContext *arg_context, Long arg_value){
     }
     if (ML_(find_rx_mapping)(di, in_arg_value, in_arg_value) != NULL){
         arg_context->feature_map.fn_pointer = True;
+        func_pointer++;
     }
 }
 
@@ -198,6 +201,8 @@ void arg_evalute_fsm(ArgContext *arg_context, Long arg_value) {
 /*--- Stuff for trace-argyments                            ---*/
 /*------------------------------------------------------------*/
 static Bool clo_trace_sbs = False;
+static Long fn_counts = 0;
+static Long real_fn_counts = 0;
 
 
 Long get_arg_value(VexGuestArchState* vex, Int j){
@@ -243,12 +248,13 @@ static void evaluate_function(Addr addr)
         clo_trace_sbs = False;
         return 0;
     }
-
+    real_fn_counts++;
     const ThreadId thread_id = VG_(get_running_tid)();
     VexGuestArchState* vex = &(VG_(get_ThreadState)(thread_id)->arch.vex);
     
 
     Int arg_num = evcon->func->arg_number;
+    view_arg += arg_num;
     tl_assert(arg_num != 0);
     ArgContext *argcon = evcon->func->arg_contexts;
     if(argcon == NULL){
@@ -297,9 +303,9 @@ static void evaluate_function(Addr addr)
 
 
 Int scan_line(Int fd, Char *buf){
-    Int current_index = -1;//указывает размер считаной строки
+    Int current_index = -1;//size of reading str
     Int error;
-    //находим первый переход строки или обнаруживаем конец файла
+
     do{ 
         current_index++;
         error = VG_(read)(fd, buf + current_index, 1);
@@ -314,8 +320,8 @@ void init_hashmap(map_t mymap){
     tl_assert(fd != NULL);
 
     EvaluateContext* value;
-    Char array[50];//буферный массив для считывания построчно всего файла
-    Int error = 1;//если 0 - то чтение не произошло
+    Char array[50];
+    Int error = 1;
     do{
         //find func address
         error = scan_line(fd, array);
@@ -324,7 +330,7 @@ void init_hashmap(map_t mymap){
         value = (EvaluateContext *)VG_(malloc)("ev.con",sizeof(EvaluateContext));
         VG_(snprintf)(value->key_string, KEY_MAX_LENGTH, "%lld", VG_(strtoll10)(array, NULL));
 
-        //find nuber of arguments
+        //fina arg number
         error = scan_line(fd, array);
         if (error <= 0)
             break;
@@ -338,7 +344,7 @@ void init_hashmap(map_t mymap){
         tl_assert(error == 0);
 
         fn_counts++;
-        
+
         for(Int j = 0; j < arg_number; j++){
             error = scan_line(fd, array);
             if (error <= 0)
@@ -347,6 +353,10 @@ void init_hashmap(map_t mymap){
     } while(1);
 
     VG_(close)(fd);
+}
+
+Int post_evaluate(EvaluateContext *data, Int number){
+    
 }
 
 /*------------------------------------------------------------*/
@@ -404,24 +414,19 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
 
 static void lk_fini(Int exitcode)
 {
-     VG_(printf)("    I finish? Wow!\n");
-     // for (index=0; index<fn_counts; index+=1)
-     // {
-     //     snprintf(key_string, KEY_MAX_LENGTH, "%s%d", KEY_PREFIX, index);
 
-     //     error = hashmap_get(mymap, key_string, (void**)(&value));
-     //     printf(" %d ", error==MAP_OK);
-     //     assert(error==MAP_OK);
-
-     //     error = hashmap_remove(mymap, key_string);
-     //     printf(" %d \n", error==MAP_OK);
-     //     assert(error==MAP_OK);
-
-     //     free(value);        
-     // }
-     
+    
+    hashmap_iterate(mymap, post_evaluate, 0);  
      /* Now, destroy the map */
-     hashmap_free(mymap);
+    hashmap_free(mymap);
+    VG_(printf)("Number of function at input: %10ld\n", fn_counts);
+    VG_(printf)("Number of features analyzed: %10ld\n", fn_counts);
+    VG_(printf)("Number of arguments viewed:  %10ld\n", view_arg);
+    VG_(printf)("-------------------------------------------\n");
+    VG_(printf)("Results of analysis:\n");
+    VG_(printf)("pointer          %10ld\n", pointers);
+    VG_(printf)("function pointer %10ld\n", func_pointer);
+    VG_(printf)("virtual class    %10ld\n", virt_class);
 }
 
 static void lk_pre_clo_init(void)
