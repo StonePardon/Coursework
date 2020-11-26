@@ -56,6 +56,8 @@ typedef struct _EvaluateContext
 /*------------------------------------------------------------*/
 static const HChar* fname = "ida_arg.txt";
 static map_t mymap;
+static const HChar* out_file = "lackey_%p.json";
+static VgFile* out_fd;
 
 static Bool lk_process_cmd_line_option(const HChar* arg)
 {
@@ -80,17 +82,19 @@ static void lk_print_debug_usage(void)
 /*------------------------------------------------------------*/
 /*--- Stuff for heuristics                                 ---*/
 /*------------------------------------------------------------*/
+static Bool pointer_flag = False;
 static Long view_arg = 0;
 static Long pointers = 0;
 static Long virt_class = 0;
 static Long func_pointer = 0;
-static VG_MINIMAL_JMP_BUF(myjmpbuf);
+//static VG_MINIMAL_JMP_BUF(myjmpbuf);
 
 
 static void SIGSEGV_handler(Int signum)
 {
     VG_(printf)("I catch a signal!!!\n");
-    VG_MINIMAL_LONGJMP(myjmpbuf);
+    //VG_MINIMAL_LONGJMP(myjmpbuf);
+    //pointer_flag = False;
 }
 
 void heuristic_pointer(ArgContext *arg_context, Long value){
@@ -111,7 +115,7 @@ void heuristic_pointer(ArgContext *arg_context, Long value){
     tl_assert(res == 0);
 
     /*сама проверка*/
-   if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
+   //if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
         Long new = *((long *) value);
         //VG_(printf)("pointer %llx\n", new);
         //Long neww = new;
@@ -143,7 +147,6 @@ void heuristic_vtable(ArgContext *arg_context, Long arg_value){
     if(!arg_context->feature_map.pointer){
         return 0;
     }
-
     Long in_arg_value = *((Long *)arg_value);
     if(in_arg_value < 16){
         return 0;
@@ -259,6 +262,8 @@ static void evaluate_function(Addr addr)
     ArgContext *argcon = evcon->func->arg_contexts;
     if(argcon == NULL){
         argcon = (ArgContext *)VG_(calloc)("arg.con", arg_num, sizeof(ArgContext));
+        tl_assert(argcon != NULL);
+        evcon->func->arg_contexts = argcon;
         for(Int i = 0; i < arg_num; i++){
             argcon[i].number_used_values = 0;
             argcon[i].max_number_values = 10;
@@ -276,6 +281,7 @@ static void evaluate_function(Addr addr)
     }
 
     for(Int j = 0; j < arg_num; j++){
+
         //get argument value from register or stack
         Long arg_value = get_arg_value(vex, j);
 
@@ -287,10 +293,10 @@ static void evaluate_function(Addr addr)
 
         if(argcon[j].number_used_values >= argcon[j].max_number_values){
             argc = VG_(realloc)("arg.con.val", argc, argcon[j].max_number_values * 2 * sizeof(Long));
+            //tl_assert(argc == NULL);
             argcon[j].max_number_values *= 2;
             argcon[j].values = argc;
         }
-
         arg_evalute_fsm(&argcon[j], arg_value); 
     }
     clo_trace_sbs = False;
@@ -298,14 +304,14 @@ static void evaluate_function(Addr addr)
 
 
 /*------------------------------------------------------------*/
-/*--- Stuff for hashmapping                                ---*/
+/*--- Stuff for hash mapping                               ---*/
 /*------------------------------------------------------------*/
 
 
 Int scan_line(Int fd, Char *buf){
-    Int current_index = -1;//size of reading str
+    Int current_index = -1;//указывает размер считаной строки
     Int error;
-
+    //находим первый переход строки или обнаруживаем конец файла
     do{ 
         current_index++;
         error = VG_(read)(fd, buf + current_index, 1);
@@ -317,11 +323,10 @@ Int scan_line(Int fd, Char *buf){
 void init_hashmap(map_t mymap){
 
     Int fd = VG_(fd_open)(fname, VKI_O_RDONLY, 666);
-    tl_assert(fd != NULL);
 
     EvaluateContext* value;
-    Char array[50];
-    Int error = 1;
+    Char array[100];//буферный массив для считывания построчно всего файла
+    Int error = 1;//если 0 - то чтение не произошло
     do{
         //find func address
         error = scan_line(fd, array);
@@ -330,7 +335,7 @@ void init_hashmap(map_t mymap){
         value = (EvaluateContext *)VG_(malloc)("ev.con",sizeof(EvaluateContext));
         VG_(snprintf)(value->key_string, KEY_MAX_LENGTH, "%lld", VG_(strtoll10)(array, NULL));
 
-        //fina arg number
+        //find arg number
         error = scan_line(fd, array);
         if (error <= 0)
             break;
@@ -344,19 +349,70 @@ void init_hashmap(map_t mymap){
         tl_assert(error == 0);
 
         fn_counts++;
-
-        for(Int j = 0; j < arg_number; j++){
+        /* open, when arguments types from ida become important
+        //pass arguments types
+        for(Int j = 0; j < arg_number; j++){ 
             error = scan_line(fd, array);
+            VG_(printf)("%s\n",array);
             if (error <= 0)
                 break;
-        }
+        }*/
     } while(1);
-
     VG_(close)(fd);
 }
 
-Int post_evaluate(EvaluateContext *data, Int number){
+Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
     
+    if (data->func != NULL) {
+        VG_(fprintf)(out_fd, "{ \'key\':\"%s\", \'FuncEvaluateContext\':", data->key_string);
+        //VG_(printf)("%s  ", data->key_string);
+
+        FuncEvaluateContext *func = data->func;
+        if (func == NULL) {
+            VG_(fprintf)(out_fd, " 0},\n");
+            return 0;
+        }
+        /*have function contexts*/
+        VG_(fprintf)(out_fd, " { \'arg_number\' : %d, \n\'ArgContext\':", func->arg_number);
+        ArgContext *arg_con = func->arg_contexts;
+        if (arg_con == NULL || arg_con == 0) {
+            VG_(fprintf)(out_fd, " 0}");
+            return 0;
+        }
+        /*have argument contexts*/
+        VG_(fprintf)(out_fd, " [ ");
+        Int arg_num = func->arg_number;
+        for (Int i = 0; i < arg_num; i++){
+            if (i !=0 )
+                VG_(fprintf)(out_fd, ",");
+            VG_(fprintf)(out_fd, "{ \'number_used_values\': %d, \'max_number_values\': %d,",
+                arg_con[i].number_used_values, arg_con[i].max_number_values);
+            VG_(fprintf)(out_fd, " \'FeaturesMap\' : {");
+            VG_(fprintf)(out_fd, " \'minval\' : %lld,", arg_con[i].feature_map.minval);
+            VG_(fprintf)(out_fd, " \'maxval\' : %lld,", arg_con[i].feature_map.maxval);
+            VG_(fprintf)(out_fd, " \'expected\' : %lld,", arg_con[i].feature_map.expected);
+            VG_(fprintf)(out_fd, " \'only_small_values\' : %d,", arg_con[i].feature_map.only_small_values);
+            VG_(fprintf)(out_fd, " \'pointer\' : %d,", arg_con[i].feature_map.pointer);
+            VG_(fprintf)(out_fd, " \'fn_pointer\' : %d,", arg_con[i].feature_map.fn_pointer);
+            VG_(fprintf)(out_fd, " \'addr_on_stack\' : %d,", arg_con[i].feature_map.addr_on_stack);
+            VG_(fprintf)(out_fd, " \'addr_on_heap\' : %d,", arg_con[i].feature_map.addr_on_heap);
+            VG_(fprintf)(out_fd, " \'probably_vtable\' : %d,", arg_con[i].feature_map.probably_vtable);
+            VG_(fprintf)(out_fd, " \'rtti_presence\' : %d},", arg_con[i].feature_map.rtti_presence);
+            VG_(fprintf)(out_fd, " \'values\' : [");
+            for (Int j = 0; j < arg_con[i].number_used_values; j++){
+                if (j !=0 )
+                    VG_(fprintf)(out_fd, ",");
+                VG_(fprintf)(out_fd, " %d", arg_con[i].values[j]);
+            }
+            VG_(fprintf)(out_fd, "]}");
+
+        }
+        VG_(fprintf)(out_fd, "]");
+
+        /*close chars of the json string*/
+        VG_(fprintf)(out_fd, " }},\n");
+    }
+    return 0;
 }
 
 /*------------------------------------------------------------*/
@@ -365,7 +421,7 @@ Int post_evaluate(EvaluateContext *data, Int number){
 
 static void lk_post_clo_init(void)
 {
-  
+    init_hashmap(mymap);
 }
 
 static
@@ -414,10 +470,16 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
 
 static void lk_fini(Int exitcode)
 {
+    HChar* lackey_out_file = VG_(expand_file_name)("--lackey-file", out_file);
+    VG_(printf)("file name - %s\n", lackey_out_file);
+    out_fd = VG_(fopen)(lackey_out_file, VKI_O_CREAT|VKI_O_WRONLY|VKI_O_TRUNC,
+                   VKI_S_IRUSR|VKI_S_IWUSR|VKI_S_IRGRP|VKI_S_IROTH); //file for rezults 
 
-    
+    Int print_rez = VG_(fprintf)(out_fd, "{ \'EvaluateContext\' : [\n");
+    /*save content of all elements in map*/
     hashmap_iterate(mymap, post_evaluate, 0);  
-     /* Now, destroy the map */
+    
+    /* Now, destroy the map */
     hashmap_free(mymap);
     VG_(printf)("Number of function at input: %10ld\n", fn_counts);
     VG_(printf)("Number of features analyzed: %10ld\n", fn_counts);
@@ -427,6 +489,8 @@ static void lk_fini(Int exitcode)
     VG_(printf)("pointer          %10ld\n", pointers);
     VG_(printf)("function pointer %10ld\n", func_pointer);
     VG_(printf)("virtual class    %10ld\n", virt_class);
+    VG_(fprintf)(out_fd, "]}");
+    VG_(fclose)(out_fd);
 }
 
 static void lk_pre_clo_init(void)
@@ -452,8 +516,6 @@ static void lk_pre_clo_init(void)
 
     
     mymap = hashmap_new();
-    init_hashmap(mymap);
-    //hashmap_free(mymap);
 
 }
 
