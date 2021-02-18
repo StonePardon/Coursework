@@ -15,6 +15,8 @@
 #include "pub_tool_options.h"
 #include "pub_tool_machine.h"     // VG_(fnptr_to_fnentry)
 #include "pub_tool_xarray.h"   // XArray
+#include "aspacemgr-linux.c"
+
 
 #define KEY_MAX_LENGTH (25)
 
@@ -82,47 +84,34 @@ static void lk_print_debug_usage(void)
 /*------------------------------------------------------------*/
 /*--- Stuff for heuristics                                 ---*/
 /*------------------------------------------------------------*/
-static Bool pointer_flag = False;
+static Bool pointer_flag = 0;
 static Long view_arg = 0;
 static Long pointers = 0;
 static Long virt_class = 0;
 static Long func_pointer = 0;
-//static VG_MINIMAL_JMP_BUF(myjmpbuf);
 
 
-static void SIGSEGV_handler(Int signum)
+void record_mapping( Addr value, Addr addr, SizeT len, UInt prot,
+                        ULong dev, ULong ino, Off64T offset,
+                        const HChar* filename )
 {
-    VG_(printf)("I catch a signal!!!\n");
-    //VG_MINIMAL_LONGJMP(myjmpbuf);
-    //pointer_flag = False;
+    if((prot & VKI_PROT_READ) && (prot & VKI_PROT_WRITE) && !ino /*&& !(prot & VKI_PROT_EXEC)*/) {
+        //if our value led in RW section
+        if (value > addr && value <= addr + len){
+            pointer_flag = True;
+        }
+    }
 }
 
 void heuristic_pointer(ArgContext *arg_context, Long value){
-    vki_sigaction_toK_t sigsegv_new;
-    vki_sigaction_fromK_t sigsegv_saved;
-
-    Int res;
-    /* Install own SIGSEGV handler */
-    sigsegv_new.ksa_handler  = &SIGSEGV_handler;
-    //((void(*)(Int)) sigsegv_new.ksa_handler) (1);
-    sigsegv_new.sa_flags    = 0;
-    sigsegv_new.sa_restorer = NULL;
-
-    res = VG_(sigemptyset)( &sigsegv_new.sa_mask);
-    tl_assert(res == 0);
-
-    res = VG_(sigaction)( VKI_SIGSEGV, &sigsegv_new, NULL);
-    tl_assert(res == 0);
-
-    /*сама проверка*/
-   //if (VG_MINIMAL_SETJMP(myjmpbuf) == 0) {
-        Long new = *((long *) value);
-        //VG_(printf)("pointer %llx\n", new);
-        //Long neww = new;
-        //return True;
-   //} else
-        //VG_(printf)("Its not a pointer\n");
-        //return False;
+    //smt pointers are NULL
+    if (!value)
+        return 0;
+    pointer_flag = False;
+    lk_parse_procselfmaps((Addr)value, &record_mapping, NULL);
+    arg_context->feature_map.pointer = pointer_flag;
+    if (pointer_flag)
+        pointers++;
 }
 
 void heuristic_stack_heap(ArgContext *arg_context, Long arg_value){
@@ -134,17 +123,16 @@ void heuristic_stack_heap(ArgContext *arg_context, Long arg_value){
     if (arg_value <= stack_hi && stack_lo <= arg_value ) {
         arg_context->feature_map.addr_on_stack = True;
         arg_context->feature_map.pointer = True;
-        pointers++;
         return 0;
     }
-    if (arg_context->feature_map.pointer && !arg_context->feature_map.addr_on_stack){
-        pointers++;
-        arg_context->feature_map.addr_on_heap = True; 
-    }
+//    if (arg_context->feature_map.pointer && !arg_context->feature_map.addr_on_stack){
+//        arg_context->feature_map.addr_on_heap = True;
+//    }
 }
 
 void heuristic_vtable(ArgContext *arg_context, Long arg_value){
-    if(!arg_context->feature_map.pointer){
+    //smt pointers are NULL
+    if(!arg_context->feature_map.pointer || !arg_value){
         return 0;
     }
     Long in_arg_value = *((Long *)arg_value);
@@ -175,7 +163,7 @@ void heuristic_vtable(ArgContext *arg_context, Long arg_value){
 }
 
 void heuristic_fn_pointer(ArgContext *arg_context, Long arg_value){
-    if(!arg_context->feature_map.pointer){
+    if(!arg_context->feature_map.pointer || !arg_value){
         return 0;
     }
     
@@ -197,7 +185,6 @@ void arg_evalute_fsm(ArgContext *arg_context, Long arg_value) {
     heuristic_vtable(arg_context, arg_value);
     heuristic_fn_pointer(arg_context, arg_value);
 }
-
 
 
 /*------------------------------------------------------------*/
@@ -495,7 +482,7 @@ static void lk_fini(Int exitcode)
 
 static void lk_pre_clo_init(void)
 {
-   VG_(details_name)            ("Arggrind");
+   VG_(details_name)            ("Arggrind!!!");
    VG_(details_version)         (NULL);
    VG_(details_description)     ("my new Valgrind tool");
    VG_(details_copyright_author)(
