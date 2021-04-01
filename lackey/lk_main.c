@@ -26,9 +26,13 @@ typedef struct _FeaturesMap{
     Long expected;
     Bool only_small_values;
     Bool pointer;
+    Bool rw_pointer;
+    Bool r_pointer;
+    Bool rx_pointer;
+    Bool rwx_pointer;
     Bool fn_pointer;
     Bool addr_on_stack;
-    Bool addr_on_heap;
+    Bool addr_on_heap;//?
     Bool probably_vtable;
     Bool rtti_presence;
 } FeaturesMap;
@@ -36,7 +40,7 @@ typedef struct _FeaturesMap{
 typedef struct _ArgContext {
     Long *values;
     Long number_used_values;
-    Long max_number_values;
+    Long max_number_values; //техническая характеристика
     FeaturesMap feature_map;
 } ArgContext;
 
@@ -85,6 +89,10 @@ static void lk_print_debug_usage(void)
 /*--- Stuff for heuristics                                 ---*/
 /*------------------------------------------------------------*/
 static Bool pointer_flag = 0;
+static Bool rw_pointer_flag = 0;
+static Bool r_pointer_flag = 0;
+static Bool rx_pointer_flag = 0;
+static Bool rwx_pointer_flag = 0;
 static Long view_arg = 0;
 static Long pointers = 0;
 static Long virt_class = 0;
@@ -95,10 +103,36 @@ void record_mapping( Addr value, Addr addr, SizeT len, UInt prot,
                         ULong dev, ULong ino, Off64T offset,
                         const HChar* filename )
 {
-    if((prot & VKI_PROT_READ) && (prot & VKI_PROT_WRITE) && !ino /*&& !(prot & VKI_PROT_EXEC)*/) {
+    if((prot & VKI_PROT_READ) && (prot & VKI_PROT_WRITE) && !ino && !(prot & VKI_PROT_EXEC)) {
         //if our value led in RW section
         if (value > addr && value <= addr + len){
             pointer_flag = True;
+            rw_pointer_flag = True;
+            pointers++;
+        }
+    }
+    if((prot & VKI_PROT_READ) && (prot & VKI_PROT_WRITE) && !ino && (prot & VKI_PROT_EXEC)) {
+        //if our value led in RW section
+        if (value > addr && value <= addr + len){
+            pointer_flag = True;
+            rwx_pointer_flag = True;
+            pointers++;
+        }
+    }
+    if((prot & VKI_PROT_READ) && !(prot & VKI_PROT_WRITE) && !ino && !(prot & VKI_PROT_EXEC)) {
+        //if our value led in R section
+        if (value > addr && value <= addr + len){
+            pointer_flag = True;
+            r_pointer_flag = True;
+            pointers++;
+        }
+    }
+    if((prot & VKI_PROT_READ) && !(prot & VKI_PROT_WRITE) && !ino && (prot & VKI_PROT_EXEC)) {
+        //if our value led in RX section
+        if (value > addr && value <= addr + len){
+            pointer_flag = True;
+            rx_pointer_flag = True;
+            pointers++;
         }
     }
 }
@@ -108,10 +142,18 @@ void heuristic_pointer(ArgContext *arg_context, Long value){
     if (!value)
         return 0;
     pointer_flag = False;
+    r_pointer_flag =  False;
+    rw_pointer_flag = False;
+    rx_pointer_flag = False;
+    rwx_pointer_flag = False;
     lk_parse_procselfmaps((Addr)value, &record_mapping, NULL);
     arg_context->feature_map.pointer = pointer_flag;
-    if (pointer_flag)
-        pointers++;
+    arg_context->feature_map.rw_pointer = rw_pointer_flag;
+    arg_context->feature_map.r_pointer = r_pointer_flag;
+    arg_context->feature_map.rx_pointer = rx_pointer_flag;
+    arg_context->feature_map.rx_pointer = rwx_pointer_flag;
+//    if (pointer_flag)
+//        pointers++;
 }
 
 void heuristic_stack_heap(ArgContext *arg_context, Long arg_value){
@@ -351,7 +393,7 @@ void init_hashmap(map_t mymap){
 Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
     
     if (data->func != NULL) {
-        VG_(fprintf)(out_fd, "{ \'key\':\"%s\", \'FuncEvaluateContext\':", data->key_string);
+        VG_(fprintf)(out_fd, "{ \"key\":\"%s\", \"FuncEvaluateContext\":", data->key_string);
         //VG_(printf)("%s  ", data->key_string);
 
         FuncEvaluateContext *func = data->func;
@@ -360,10 +402,10 @@ Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
             return 0;
         }
         /*have function contexts*/
-        VG_(fprintf)(out_fd, " { \'arg_number\' : %d, \n\'ArgContext\':", func->arg_number);
+        VG_(fprintf)(out_fd, " { \"arg_number\" : %d, \n\"ArgContext\":", func->arg_number);
         ArgContext *arg_con = func->arg_contexts;
         if (arg_con == NULL || arg_con == 0) {
-            VG_(fprintf)(out_fd, " 0}");
+            VG_(fprintf)(out_fd, " 0}},");
             return 0;
         }
         /*have argument contexts*/
@@ -372,20 +414,25 @@ Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
         for (Int i = 0; i < arg_num; i++){
             if (i !=0 )
                 VG_(fprintf)(out_fd, ",");
-            VG_(fprintf)(out_fd, "{ \'number_used_values\': %d, \'max_number_values\': %d,",
+            VG_(fprintf)(out_fd, "{ \"number_used_values\": %d, \"max_number_values\": %d,",
                 arg_con[i].number_used_values, arg_con[i].max_number_values);
-            VG_(fprintf)(out_fd, " \'FeaturesMap\' : {");
-            VG_(fprintf)(out_fd, " \'minval\' : %lld,", arg_con[i].feature_map.minval);
-            VG_(fprintf)(out_fd, " \'maxval\' : %lld,", arg_con[i].feature_map.maxval);
-            VG_(fprintf)(out_fd, " \'expected\' : %lld,", arg_con[i].feature_map.expected);
-            VG_(fprintf)(out_fd, " \'only_small_values\' : %d,", arg_con[i].feature_map.only_small_values);
-            VG_(fprintf)(out_fd, " \'pointer\' : %d,", arg_con[i].feature_map.pointer);
-            VG_(fprintf)(out_fd, " \'fn_pointer\' : %d,", arg_con[i].feature_map.fn_pointer);
-            VG_(fprintf)(out_fd, " \'addr_on_stack\' : %d,", arg_con[i].feature_map.addr_on_stack);
-            VG_(fprintf)(out_fd, " \'addr_on_heap\' : %d,", arg_con[i].feature_map.addr_on_heap);
-            VG_(fprintf)(out_fd, " \'probably_vtable\' : %d,", arg_con[i].feature_map.probably_vtable);
-            VG_(fprintf)(out_fd, " \'rtti_presence\' : %d},", arg_con[i].feature_map.rtti_presence);
-            VG_(fprintf)(out_fd, " \'values\' : [");
+            VG_(fprintf)(out_fd, " \"FeaturesMap\" : {");
+//            it's don't useful (need to make math function for calculating this values)
+//            VG_(fprintf)(out_fd, " \"minval\" : %lld,", arg_con[i].feature_map.minval);
+//            VG_(fprintf)(out_fd, " \"maxval\" : %lld,", arg_con[i].feature_map.maxval);
+//            VG_(fprintf)(out_fd, " \"expected\" : %lld,", arg_con[i].feature_map.expected);
+            VG_(fprintf)(out_fd, " \"only_small_values\" : %d,", arg_con[i].feature_map.only_small_values);
+            VG_(fprintf)(out_fd, " \"pointer\" : %d,", arg_con[i].feature_map.pointer);
+            VG_(fprintf)(out_fd, " \"rw_pointer\" : %d,", arg_con[i].feature_map.rw_pointer);
+            VG_(fprintf)(out_fd, " \"r_pointer\" : %d,", arg_con[i].feature_map.r_pointer);
+            VG_(fprintf)(out_fd, " \"rx_pointer\" : %d,", arg_con[i].feature_map.rx_pointer);
+            VG_(fprintf)(out_fd, " \"rwx_pointer\" : %d,", arg_con[i].feature_map.rwx_pointer);
+            VG_(fprintf)(out_fd, " \"fn_pointer\" : %d,", arg_con[i].feature_map.fn_pointer);
+            VG_(fprintf)(out_fd, " \"addr_on_stack\" : %d,", arg_con[i].feature_map.addr_on_stack);
+            VG_(fprintf)(out_fd, " \"addr_on_heap\" : %d,", arg_con[i].feature_map.addr_on_heap);
+            VG_(fprintf)(out_fd, " \"probably_vtable\" : %d,", arg_con[i].feature_map.probably_vtable);
+            VG_(fprintf)(out_fd, " \"rtti_presence\" : %d},", arg_con[i].feature_map.rtti_presence);
+            VG_(fprintf)(out_fd, " \"values\" : [");
             for (Int j = 0; j < arg_con[i].number_used_values; j++){
                 if (j !=0 )
                     VG_(fprintf)(out_fd, ",");
@@ -462,7 +509,7 @@ static void lk_fini(Int exitcode)
     out_fd = VG_(fopen)(lackey_out_file, VKI_O_CREAT|VKI_O_WRONLY|VKI_O_TRUNC,
                    VKI_S_IRUSR|VKI_S_IWUSR|VKI_S_IRGRP|VKI_S_IROTH); //file for rezults 
 
-    Int print_rez = VG_(fprintf)(out_fd, "{ \'EvaluateContext\' : [\n");
+    Int print_rez = VG_(fprintf)(out_fd, "{ \"EvaluateContext\" : [\n");
     /*save content of all elements in map*/
     hashmap_iterate(mymap, post_evaluate, 0);  
     
@@ -476,7 +523,8 @@ static void lk_fini(Int exitcode)
     VG_(printf)("pointer          %10ld\n", pointers);
     VG_(printf)("function pointer %10ld\n", func_pointer);
     VG_(printf)("virtual class    %10ld\n", virt_class);
-    VG_(fprintf)(out_fd, "]}");
+    //add void braces to solve json problem with last ',' symbol
+    VG_(fprintf)(out_fd, "{}]}");
     VG_(fclose)(out_fd);
 }
 
@@ -486,7 +534,7 @@ static void lk_pre_clo_init(void)
    VG_(details_version)         (NULL);
    VG_(details_description)     ("my new Valgrind tool");
    VG_(details_copyright_author)(
-      "Copyright (C) 2020, and GNU GPL'd, by Barbara Akhapkina and Michael Voronov");
+      "Copyright (C) 2020-2021, and GNU GPL'd, by Barbara Akhapkina and Mike Voronov");
    VG_(details_bug_reports_to)  (VG_BUGS_TO);
    VG_(details_avg_translation_sizeB) ( 200 );
    
