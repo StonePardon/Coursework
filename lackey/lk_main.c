@@ -2,7 +2,7 @@
 #include "pub_tool_tooliface.h"
 #include "pub_tool_libcassert.h"
 #include "pub_tool_libcsignal.h"
-#include "pub_tool_libcsetjmp.h" 
+#include "pub_tool_libcsetjmp.h"
 #include "pub_tool_libcprint.h"
 #include "pub_tool_libcfile.h" //file open
 #include "priv_storage.h"
@@ -31,6 +31,7 @@ typedef struct _FeaturesMap{
     Bool rx_pointer;
     Bool rwx_pointer;
     Bool fn_pointer;
+    Bool char_string;
     Bool addr_on_stack;
     Bool addr_on_heap;//?
     Bool probably_vtable;
@@ -67,22 +68,22 @@ static VgFile* out_fd;
 
 static Bool lk_process_cmd_line_option(const HChar* arg)
 {
-   if VG_STR_CLO(arg, "--fname", fname) {}
-   else return False;
-   
-   tl_assert(fname);
-   tl_assert(fname[0]);
-   return True;
+    if VG_STR_CLO(arg, "--fname", fname) {}
+    else return False;
+
+    tl_assert(fname);
+    tl_assert(fname[0]);
+    return True;
 }
 
 static void lk_print_usage(void)
-{ 
-   VG_(printf)("    --fname=<name>           input file <name> \n");
+{
+    VG_(printf)("    --fname=<name>           input file <name> \n");
 }
 
 static void lk_print_debug_usage(void)
-{  
-   VG_(printf)("    (none)\n");
+{
+    VG_(printf)("    (none)\n");
 }
 
 /*------------------------------------------------------------*/
@@ -100,8 +101,8 @@ static Long func_pointer = 0;
 
 
 void record_mapping( Addr value, Addr addr, SizeT len, UInt prot,
-                        ULong dev, ULong ino, Off64T offset,
-                        const HChar* filename )
+                     ULong dev, ULong ino, Off64T offset,
+                     const HChar* filename )
 {
     if((prot & VKI_PROT_READ) && (prot & VKI_PROT_WRITE) && !ino && !(prot & VKI_PROT_EXEC)) {
         //if our value led in RW section
@@ -155,6 +156,16 @@ void heuristic_pointer(ArgContext *arg_context, Long value){
 //    if (pointer_flag)
 //        pointers++;
 }
+void heuristic_char_string(ArgContext *arg_context, Long arg_value){
+    if (!arg_context->feature_map.pointer || !arg_value)
+        return;
+    Char *str_pointer = (Char *)arg_value;
+    Long str_size = 0;
+    while ( str_pointer[str_size] >= ' ' &&  str_pointer[str_size] <= '~')
+        str_size++;
+    if (str_size)
+        arg_context->feature_map.char_string = True;
+}
 
 void heuristic_stack_heap(ArgContext *arg_context, Long arg_value){
 
@@ -181,7 +192,7 @@ void heuristic_vtable(ArgContext *arg_context, Long arg_value){
     if(in_arg_value < 16){
         return 0;
     }
-    
+
     if (ML_(find_rw_mapping)(in_arg_value - 16, in_arg_value) != NULL){
 
         /* can take pointer - data placed in read-write segment*/
@@ -208,7 +219,7 @@ void heuristic_fn_pointer(ArgContext *arg_context, Long arg_value){
     if(!arg_context->feature_map.pointer || !arg_value){
         return 0;
     }
-    
+
     Long in_arg_value = *((Long *)arg_value);
     DebugInfo *di = VG_(find_DebugInfo)(VG_(current_DiEpoch)(),in_arg_value);
     if (di == NULL){
@@ -223,6 +234,7 @@ void heuristic_fn_pointer(ArgContext *arg_context, Long arg_value){
 
 void arg_evalute_fsm(ArgContext *arg_context, Long arg_value) {
     heuristic_pointer(arg_context, arg_value);
+    heuristic_char_string(arg_context, arg_value);
     heuristic_stack_heap(arg_context, arg_value);
     heuristic_vtable(arg_context, arg_value);
     heuristic_fn_pointer(arg_context, arg_value);
@@ -270,7 +282,7 @@ static void evaluate_function(Addr addr)
     }
     EvaluateContext* evcon;
     Char key_string[KEY_MAX_LENGTH];
-    /*we need the loading address of the text section 
+    /*we need the loading address of the text section
     to calculate the address of the function without an offset.*/
     VG_(snprintf)(key_string, KEY_MAX_LENGTH,"%lld", addr - di->text_bias);
 
@@ -283,7 +295,7 @@ static void evaluate_function(Addr addr)
     real_fn_counts++;
     const ThreadId thread_id = VG_(get_running_tid)();
     VexGuestArchState* vex = &(VG_(get_ThreadState)(thread_id)->arch.vex);
-    
+
 
     Int arg_num = evcon->func->arg_number;
     view_arg += arg_num;
@@ -298,14 +310,6 @@ static void evaluate_function(Addr addr)
             argcon[i].max_number_values = 10;
             argcon[i].values = (Long *) VG_(calloc)("arg.con.val", argcon[i].max_number_values, sizeof(Long));
             tl_assert(argcon[i].values != NULL);
-
-            argcon[i].feature_map.only_small_values = False;
-            argcon[i].feature_map.pointer = False;
-            argcon[i].feature_map.fn_pointer = False;
-            argcon[i].feature_map.addr_on_stack = False;
-            argcon[i].feature_map.addr_on_heap = False;
-            argcon[i].feature_map.probably_vtable = False;
-            argcon[i].feature_map.rtti_presence = False;
         }
     }
 
@@ -326,7 +330,7 @@ static void evaluate_function(Addr addr)
             argcon[j].max_number_values *= 2;
             argcon[j].values = argc;
         }
-        arg_evalute_fsm(&argcon[j], arg_value); 
+        arg_evalute_fsm(&argcon[j], arg_value);
     }
     clo_trace_sbs = False;
 }
@@ -341,7 +345,7 @@ Int scan_line(Int fd, Char *buf){
     Int current_index = -1;//указывает размер считаной строки
     Int error;
     //находим первый переход строки или обнаруживаем конец файла
-    do{ 
+    do{
         current_index++;
         error = VG_(read)(fd, buf + current_index, 1);
     } while(error > 0 && buf[current_index] != '\n');
@@ -380,7 +384,7 @@ void init_hashmap(map_t mymap){
         fn_counts++;
         /* open, when arguments types from ida become important
         //pass arguments types
-        for(Int j = 0; j < arg_number; j++){ 
+        for(Int j = 0; j < arg_number; j++){
             error = scan_line(fd, array);
             VG_(printf)("%s\n",array);
             if (error <= 0)
@@ -391,7 +395,7 @@ void init_hashmap(map_t mymap){
 }
 
 Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
-    
+
     if (data->func != NULL) {
         VG_(fprintf)(out_fd, "{ \"key\":\"%s\", \"FuncEvaluateContext\":", data->key_string);
         //VG_(printf)("%s  ", data->key_string);
@@ -415,7 +419,7 @@ Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
             if (i !=0 )
                 VG_(fprintf)(out_fd, ",");
             VG_(fprintf)(out_fd, "{ \"number_used_values\": %d, \"max_number_values\": %d,",
-                arg_con[i].number_used_values, arg_con[i].max_number_values);
+                         arg_con[i].number_used_values, arg_con[i].max_number_values);
             VG_(fprintf)(out_fd, " \"FeaturesMap\" : {");
 //            it's don't useful (need to make math function for calculating this values)
 //            VG_(fprintf)(out_fd, " \"minval\" : %lld,", arg_con[i].feature_map.minval);
@@ -428,6 +432,7 @@ Int post_evaluate(EvaluateContext *item, EvaluateContext *data){
             VG_(fprintf)(out_fd, " \"rx_pointer\" : %d,", arg_con[i].feature_map.rx_pointer);
             VG_(fprintf)(out_fd, " \"rwx_pointer\" : %d,", arg_con[i].feature_map.rwx_pointer);
             VG_(fprintf)(out_fd, " \"fn_pointer\" : %d,", arg_con[i].feature_map.fn_pointer);
+            VG_(fprintf)(out_fd, " \"char_string\" : %d,", arg_con[i].feature_map.char_string);
             VG_(fprintf)(out_fd, " \"addr_on_stack\" : %d,", arg_con[i].feature_map.addr_on_stack);
             VG_(fprintf)(out_fd, " \"addr_on_heap\" : %d,", arg_con[i].feature_map.addr_on_heap);
             VG_(fprintf)(out_fd, " \"probably_vtable\" : %d,", arg_con[i].feature_map.probably_vtable);
@@ -460,14 +465,14 @@ static void lk_post_clo_init(void)
 
 static
 IRSB* lk_instrument ( VgCallbackClosure* closure,
-                      IRSB* sbIn, 
-                      const VexGuestLayout* layout, 
+                      IRSB* sbIn,
+                      const VexGuestLayout* layout,
                       const VexGuestExtents* vge,
                       const VexArchInfo* archinfo_host,
                       IRType gWordTy, IRType hWordTy )
 {
 
-   //print fn address in runtime
+    //print fn address in runtime
     if (clo_trace_sbs){
         IRDirty*   di;
         Int        i;
@@ -478,15 +483,15 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
         sbOut = deepCopyIRSBExceptStmts(sbIn);
         i = 0;
         while (i < sbIn->stmts_used && sbIn->stmts[i]->tag != Ist_IMark) {
-        addStmtToIRSB( sbOut, sbIn->stmts[i] );
+            addStmtToIRSB( sbOut, sbIn->stmts[i] );
             i++;
         }
         /*get the fnptr to fnentry*/
-        di = unsafeIRDirty_0_N(0, "evaluate_function", 
-            VG_(fnptr_to_fnentry)( &evaluate_function ),
-            mkIRExprVec_1( mkIRExpr_HWord( vge->base[0])));
+        di = unsafeIRDirty_0_N(0, "evaluate_function",
+                               VG_(fnptr_to_fnentry)( &evaluate_function ),
+                               mkIRExprVec_1( mkIRExpr_HWord( vge->base[0])));
         addStmtToIRSB( sbOut, IRStmt_Dirty(di) );
-      
+
         for (/*use current i*/; i < sbIn->stmts_used; i++) {
             IRStmt* st = sbIn->stmts[i];
             if (!st || st->tag == Ist_NoOp) continue;
@@ -497,8 +502,8 @@ IRSB* lk_instrument ( VgCallbackClosure* closure,
 
     if (sbIn->jumpkind == Ijk_Call) {
         /* flag - next block is function */
-        clo_trace_sbs = True;   
-    }        
+        clo_trace_sbs = True;
+    }
     return sbIn;
 }
 
@@ -507,12 +512,12 @@ static void lk_fini(Int exitcode)
     HChar* lackey_out_file = VG_(expand_file_name)("--lackey-file", out_file);
     VG_(printf)("file name - %s\n", lackey_out_file);
     out_fd = VG_(fopen)(lackey_out_file, VKI_O_CREAT|VKI_O_WRONLY|VKI_O_TRUNC,
-                   VKI_S_IRUSR|VKI_S_IWUSR|VKI_S_IRGRP|VKI_S_IROTH); //file for rezults 
+                        VKI_S_IRUSR|VKI_S_IWUSR|VKI_S_IRGRP|VKI_S_IROTH); //file for rezults
 
     Int print_rez = VG_(fprintf)(out_fd, "{ \"EvaluateContext\" : [\n");
     /*save content of all elements in map*/
-    hashmap_iterate(mymap, post_evaluate, 0);  
-    
+    hashmap_iterate(mymap, post_evaluate, 0);
+
     /* Now, destroy the map */
     hashmap_free(mymap);
     VG_(printf)("Number of function at input: %10ld\n", fn_counts);
@@ -530,26 +535,26 @@ static void lk_fini(Int exitcode)
 
 static void lk_pre_clo_init(void)
 {
-   VG_(details_name)            ("Arggrind!!!");
-   VG_(details_version)         (NULL);
-   VG_(details_description)     ("my new Valgrind tool");
-   VG_(details_copyright_author)(
-      "Copyright (C) 2020-2021, and GNU GPL'd, by Barbara Akhapkina and Mike Voronov");
-   VG_(details_bug_reports_to)  (VG_BUGS_TO);
-   VG_(details_avg_translation_sizeB) ( 200 );
-   
-   VG_(clo_vex_control).iropt_unroll_thresh = 0;   // cannot be overridden.
-   VG_(clo_vex_control).guest_chase = False;       // cannot be overridden.
+    VG_(details_name)            ("Arggrind!!!");
+    VG_(details_version)         (NULL);
+    VG_(details_description)     ("my new Valgrind tool");
+    VG_(details_copyright_author)(
+            "Copyright (C) 2020-2021, and GNU GPL'd, by Barbara Akhapkina and Mike Voronov");
+    VG_(details_bug_reports_to)  (VG_BUGS_TO);
+    VG_(details_avg_translation_sizeB) ( 200 );
 
-   VG_(basic_tool_funcs)          (lk_post_clo_init,
-                                   lk_instrument,
-                                   lk_fini);
+    VG_(clo_vex_control).iropt_unroll_thresh = 0;   // cannot be overridden.
+    VG_(clo_vex_control).guest_chase = False;       // cannot be overridden.
 
-   VG_(needs_command_line_options)(lk_process_cmd_line_option,
-                                   lk_print_usage,
-                                   lk_print_debug_usage);
+    VG_(basic_tool_funcs)          (lk_post_clo_init,
+                                    lk_instrument,
+                                    lk_fini);
 
-    
+    VG_(needs_command_line_options)(lk_process_cmd_line_option,
+                                    lk_print_usage,
+                                    lk_print_debug_usage);
+
+
     mymap = hashmap_new();
 
 }
