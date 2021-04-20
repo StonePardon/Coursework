@@ -3,4 +3,4 @@
 Затем скомпилировать это чудо 
 
 <b>Пример использования:</b>
-valgrind --tool=lackey --fname=<file with args from ida plagin.txt> ./<name of your programm>
+valgrind --tool=lackey --fname=\<file with args from ida plagin.txt\> ./\<name of your programm\>
